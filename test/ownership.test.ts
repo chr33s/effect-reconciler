@@ -178,7 +178,7 @@ describe("ownership", () => {
         // workspace generations ever became Running.
         const Marker = define.one("Marker", {
           owner: Workspace,
-          start: () =>
+          start: (_: null) =>
             Effect.gen(function* () {
               const ready = yield* WorkspaceReady
               log.push(`marker:${ready.under}`)

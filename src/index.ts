@@ -24,7 +24,6 @@ export {
   OwnershipCycle,
   SelectorFailed,
   UnresolvableProvider,
-  UnstableKey,
   type BindingError,
   type CommitError,
   type DefinitionError,

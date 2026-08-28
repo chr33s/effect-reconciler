@@ -117,21 +117,10 @@ export class SelectorFailed extends Data.TaggedError("SelectorFailed")<{
   readonly error: unknown
 }> {}
 
-/**
- * A key is compared by reference rather than structurally — in practice, a
- * function — so a selector building it per commit would replace the lifetime
- * every time. Use a value Effect compares structurally.
- */
-export class UnstableKey extends Data.TaggedError("UnstableKey")<{
-  readonly family: AnyHandle
-  readonly key: unknown
-}> {}
-
 export type InvalidDesiredStateReason =
   | DuplicateDesiredKey
   | InvalidSelectorResult
   | SelectorFailed
-  | UnstableKey
 
 /**
  * A commit produced a dynamically invalid desired snapshot. The previous

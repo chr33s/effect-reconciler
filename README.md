@@ -124,9 +124,11 @@ Design decisions and their evidence are in
 
 See [`examples/editor.ts`](examples/editor.ts) for the full editor topology
 from the spec, bound to two different control planes, and
-[`examples/foldkit`](examples/foldkit/README.md) for one real Foldkit feature
+[`examples/foldkit`](examples/foldkit/README.md) for one Foldkit feature
 implemented with and without the reconciler, with the coordination it deletes
-measured.
+measured, and [`examples/foldkit-migration`](examples/foldkit-migration/README.md)
+for an upstream Foldkit example app migrated onto it — including where that did
+not pay off.
 
 ## Semantics proven by the conformance suite
 

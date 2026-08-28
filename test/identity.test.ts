@@ -1,4 +1,4 @@
-import { Data, Effect, Equal, Option } from "effect"
+import { Data, Effect, Equal, Hash, Option } from "effect"
 import { describe, expect, it } from "@effect/vitest"
 import * as Reconciler from "../src/Reconciler.js"
 import { count, eventually, idle } from "./util.js"
@@ -265,6 +265,85 @@ describe("identity", () => {
         "every distinct structure got its own lifetime"
       )
       expect(new Set(log).size).toBe(adversarial.length)
+    }))
+
+  it.live("a key compared by reference is fine while the value is stable", () =>
+    Effect.gen(function* () {
+      const log: Array<string> = []
+      // Opting out of structural comparison: this value is identified by
+      // reference, which is legitimate as long as the Binding yields the same
+      // value each commit.
+      const stable = Equal.byReference({ id: "a" })
+      const Def = Reconciler.define((define) => ({
+        Res: define.one("Res", {
+          start: (k: { readonly id: string }) => Effect.sync(() => log.push(`start:${k.id}`))
+        })
+      }))
+      const controller = yield* Reconciler.make(
+        Def.bind<{ readonly fresh: boolean }>((bind) => ({
+          res: bind.one(Def.Res, (s) =>
+            Option.some(s.fresh ? Equal.byReference({ id: "a" }) : stable)
+          )
+        }))
+      )
+
+      yield* controller.commit({ fresh: false })
+      yield* eventually(() => log.length === 1, "started")
+      // The same reference: one lifetime, however many commits.
+      yield* controller.commit({ fresh: false })
+      yield* controller.commit({ fresh: false })
+      yield* idle(controller)
+      expect(log).toEqual(["start:a"])
+
+      // A fresh by-reference value each commit is a different key, so it
+      // replaces the lifetime — the documented consequence of opting out.
+      yield* controller.commit({ fresh: true })
+      yield* idle(controller)
+      expect(log).toEqual(["start:a", "start:a"])
+    }))
+
+  it.live("a function implementing Equal and Hash is a structural key", () =>
+    Effect.gen(function* () {
+      const log: Array<string> = []
+      // Effect compares functions by reference unless they say otherwise, so
+      // a function that implements Equal/Hash is a perfectly good key.
+      interface Rule {
+        (input: string): string
+        readonly name_: string
+      }
+      const rule = (name: string): Rule => {
+        const fn = ((input: string) => `${name}:${input}`) as Rule & {
+          name_: string
+          [Equal.symbol]: (that: unknown) => boolean
+          [Hash.symbol]: () => number
+        }
+        fn.name_ = name
+        fn[Equal.symbol] = (that) =>
+          typeof that === "function" && (that as Rule).name_ === name
+        fn[Hash.symbol] = () => Hash.string(name)
+        return fn
+      }
+
+      const Def = Reconciler.define((define) => ({
+        Res: define.one("Res", {
+          start: (k: Rule) => Effect.sync(() => log.push(`start:${k.name_}`))
+        })
+      }))
+      const controller = yield* Reconciler.make(
+        Def.bind<{ readonly rule: string }>((bind) => ({
+          res: bind.one(Def.Res, (s) => Option.some(rule(s.rule)))
+        }))
+      )
+
+      yield* controller.commit({ rule: "strict" })
+      yield* eventually(() => log.includes("start:strict"), "started")
+      // A different function instance with the same identity: retained.
+      yield* controller.commit({ rule: "strict" })
+      yield* idle(controller)
+      expect(log).toEqual(["start:strict"])
+      // A different identity: replaced.
+      yield* controller.commit({ rule: "lax" })
+      yield* eventually(() => log.includes("start:lax"), "replaced")
     }))
 
   it.live("numeric keys follow Effect equality: 0 and -0 are one lifetime", () =>

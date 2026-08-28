@@ -7,12 +7,11 @@ import {
   InvalidDesiredState,
   InvalidSelectorResult,
   SelectorFailed,
-  UnstableKey,
   type InvalidDesiredStateReason
 } from "../Errors.js"
 import type { LifetimeRef } from "../LifetimeRef.js"
 import type { Compiled } from "./compiledDefinition.js"
-import { hasStableIdentity, Ident, oneSlot } from "./identity.js"
+import { Ident, oneSlot } from "./identity.js"
 
 /** One desired instance: family + semantic key, owner-relative. */
 export interface DesiredNode {
@@ -110,11 +109,6 @@ export const evaluate = <State>(
       }
 
       for (const key of keys) {
-        // Semantic identity is Effect's: a key compared by reference would
-        // make every commit look like a different lifetime.
-        if (!hasStableIdentity(key)) {
-          return invalid(new UnstableKey({ family: family.handle, key }))
-        }
         const ident = new Ident(family.id, key, parent === null ? null : parent.ident)
         if (MutableHashMap.has(byIdent, ident)) {
           return invalid(new DuplicateDesiredKey({ family: family.handle, key }))

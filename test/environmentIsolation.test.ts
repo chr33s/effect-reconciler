@@ -102,7 +102,7 @@ describe("environment isolation", () => {
         const Dep = define.one("Dep", {
           owner: Session,
           requires: { settings: Settings },
-          start: () =>
+          start: (_: null) =>
             Effect.gen(function* () {
               const settings = yield* SettingsService
               const session = yield* SessionService

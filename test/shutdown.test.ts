@@ -20,7 +20,7 @@ describe("shutdown", () => {
         })
         const Child = define.one("Child", {
           owner: Slow,
-          start: () => Effect.sync(() => log.push("child:start"))
+          start: (_: null) => Effect.sync(() => log.push("child:start"))
         })
         return { Slow, Child }
       })

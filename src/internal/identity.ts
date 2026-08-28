@@ -56,14 +56,3 @@ export class Ident implements Equal.Equal {
  * user is desired. A symbol can never equal a user key value.
  */
 export const oneSlot: unique symbol = Symbol.for("effect-reconciler/oneSlot")
-
-/**
- * Whether a value can carry structural identity across commits.
- *
- * Effect compares and hashes ordinary values structurally — primitives,
- * arrays, plain objects, class instances, `Data` values, `Date`, `Map`, `Set`
- * — so keys need no ceremony. A function is the one exception: it is compared
- * by reference, so a selector building one per commit would silently replace
- * the lifetime every time. Rejecting that is kinder than churning forever.
- */
-export const hasStableIdentity = (key: unknown): boolean => typeof key !== "function"

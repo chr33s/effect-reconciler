@@ -78,11 +78,19 @@ Reconciler.define((define) => {
   })
   const Bad = define.one("Bad", {
     owner: Session,
-    // @ts-expect-error — the start key is a string, not a number
-    start: (key) => Effect.succeed(Math.abs(key))
+    // The key parameter must be annotated, so a wrong annotation is what a
+    // mistake looks like now: the Binding below cannot supply a number.
+    start: (key: number) => Effect.succeed(Math.abs(key))
   })
   return { Session, Bad }
 })
+
+// An un-inferable key type is rejected where the handle is used, rather than
+// silently widening to `unknown` and letting the Binding desire anything.
+const Unannotated = Reconciler.define((define) => ({
+  // @ts-expect-error — `start` ignores its key, so the key type is unknown
+  Res: define.one("Res", { start: () => Effect.void })
+}))
 
 // -----------------------------------------------------------------------------
 // Startup environments (§28, §29, §60)
@@ -110,7 +118,7 @@ const Wired = Reconciler.define((define) => {
   const Child = define.one("Child", {
     owner: Session,
     requires: { settings: Settings },
-    start: () =>
+    start: (_: null) =>
       Effect.gen(function* () {
         yield* SessionService // published by the owner
         yield* SettingsService // published by a required provider
@@ -140,7 +148,7 @@ const Unmet = Reconciler.define((define) => {
   })
   const Loose = define.one("Loose", {
     // No `owner`, no `requires`: Settings is a sibling, not a provider.
-    start: () => Effect.service(SettingsService)
+    start: (_: null) => Effect.service(SettingsService)
   })
   return { Settings, Loose }
 })

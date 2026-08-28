@@ -9,6 +9,7 @@
     "lint": "effect-tsgo diagnostics --project tsconfig.json --format pretty",
     "bench": "vitest run --config bench/vitest.config.ts",
     "example:metrics": "node examples/foldkit/metrics.mjs",
+    "example:migration-metrics": "node examples/foldkit-migration/metrics.mjs",
     "test": "vitest run",
     "prepare": "effect-tsgo patch --typescript --no-oxlint"
   },

@@ -237,6 +237,48 @@ describe("retry", () => {
       expect(yield* statusTag(controller, ref)).toBe("Failed")
     }))
 
+  it.live("a retry interrupted before its retirement point retires nothing", () =>
+    Effect.gen(function* () {
+      const log: Array<string> = []
+      const Def = Reconciler.define((define) => ({
+        Res: define.one("Res", {
+          start: (k: string) =>
+            Effect.gen(function* () {
+              log.push(`attempt:${k}`)
+              return yield* new StartupFailed({ reason: "boom" })
+            })
+        })
+      }))
+      const controller = yield* Reconciler.make(
+        Def.bind<{}>((bind) => ({ res: bind.one(Def.Res, () => Option.some("a")) }))
+      )
+      const ref = Reconciler.ref(Def.Res, "a", null)
+
+      yield* controller.commit({})
+      yield* eventually(() => log.length === 1, "failed once")
+      yield* idle(controller)
+
+      // Parked waiting for the controller mutex, then interrupted there.
+      yield* holding(controller)(
+        Effect.gen(function* () {
+          const fiber = yield* Effect.forkScoped(controller.retry(ref), {
+            startImmediately: true
+          })
+          yield* Effect.sleep(5)
+          yield* Fiber.interrupt(fiber)
+        })
+      )
+      yield* idle(controller)
+
+      // Nothing was retired: the failed generation still holds its slot.
+      expect(log).toEqual(["attempt:a"])
+      expect(yield* statusTag(controller, ref)).toBe("Failed")
+
+      // ...and the controller is not wedged: a real retry still works.
+      yield* controller.retry(ref)
+      yield* eventually(() => log.length === 2, "retried after the interruption")
+    }))
+
   it.live("§1.7 — retry after shutdown fails with ControllerClosed", () =>
     Effect.gen(function* () {
       const Def = Reconciler.define((define) => ({

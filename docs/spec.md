@@ -2958,9 +2958,19 @@ all of them structurally. Nothing has to be serialized, and therefore nothing
 has to be escaped: the delimiter-collision class of bug the earlier encoded
 path scheme had to defend against cannot be expressed.
 
-The one value Effect compares by reference is a function, so a function key is
-rejected as invalid desired state rather than churning the lifetime on every
-commit.
+Two rules complete the contract, neither checked at runtime:
+
+- **Keys are immutable.** Identity is cached per key value, so mutating a key
+  after it has been desired corrupts the identity it was admitted under.
+- **Keys compare stably.** A value compared by reference — a plain function, or
+  anything wrapped in `Equal.byReference` — is a valid key exactly when the
+  Binding yields the same value each commit. A function that carries `Equal`
+  and `Hash` is an ordinary structural key.
+
+The key type is inferred from `start`, so its parameter must be annotated;
+`(_: null)` names a family whose key carries no information. An un-inferable
+key type is rejected at compile time rather than widening to `unknown`, which
+would let a Binding desire anything at all for that family.
 
 The §8.3 rule is unchanged and now purely semantic:
 

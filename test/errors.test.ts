@@ -136,27 +136,4 @@ describe("error algebra", () => {
       )
       expect(closed).toBe("closed")
     }))
-
-  it.live("a key compared by reference is rejected rather than churning", () =>
-    Effect.gen(function* () {
-      const Def = Reconciler.define((define) => ({
-        Res: define.one("Res", { start: (_k: () => void) => Effect.void })
-      }))
-      const controller = yield* Reconciler.make(
-        Def.bind<{}>((bind) => ({
-          // A function is the one value Effect compares by reference, so a
-          // fresh one each commit would replace the lifetime every time.
-          res: bind.one(Def.Res, () => Option.some(() => {}))
-        }))
-      )
-
-      const rejected = yield* controller.commit({}).pipe(
-        Effect.as("committed"),
-        Effect.catchTags({
-          InvalidDesiredState: (error) => Effect.succeed(error.reason._tag),
-          ControllerClosed: () => Effect.succeed("closed")
-        })
-      )
-      expect(rejected).toBe("UnstableKey")
-    }))
 })

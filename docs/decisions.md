@@ -163,8 +163,17 @@ structural identity there is no encoding to collide inside, and a key is just a
 value. Effect compares plain objects, arrays, class instances and `Data` values
 structurally, so this costs the user nothing.
 
-**Rules out.** Serialization as the primary identity mechanism. A function key
-is rejected (`UnstableKey`) because it is the one value compared by reference.
+**Rules out.** Serialization as the primary identity mechanism.
+
+**The contract, unchecked at runtime.** Keys must be **immutable** — identity
+is cached per key, so mutating one after it is desired corrupts the identity it
+was admitted under — and must **compare stably**. Reference-compared values (a
+plain function, or anything wrapped in `Equal.byReference`) are legitimate keys
+when the Binding yields the same value each commit, and churn the lifetime
+every commit when it does not. An earlier draft rejected function keys outright
+as `UnstableKey`; that was removed, because a function carrying `Equal`/`Hash`
+is a perfectly good structural key and the check caught only one member of a
+class of user error it could not detect in general.
 
 **Cost, measured.** Convergence is 10–25% slower than string paths at 10,000
 lifetimes, with identical churn; `bench/RESULTS.md` records both. Three
@@ -214,11 +223,15 @@ invalidation schedulers exist.
 **Why.** The benchmark shows churn is already scale-invariant and selective:
 zero churn on an equivalent commit, two starts and two stops for one changed
 document whether there are 100 or 10,000. What scales with N is selector
-evaluation — ~7ms at 10,000 lifetimes, at the caller's boundary rather than
-holding the controller. Adding incremental machinery now would trade a simple,
-provably correct pass for cache-invalidation bugs, against no measured need.
+evaluation: at 10,000 lifetimes a no-op commit is ~8 ms at p50 and ~19 ms at
+p95, paid at the caller's boundary rather than holding the controller, with
+~22 ms of background convergence behind it. At editor scale — hundreds to low
+thousands — commit is under a millisecond. Adding incremental machinery now
+would trade a simple, provably correct pass for cache-invalidation bugs,
+against no measured need.
 
 **Reconsider when.** A real workload shows selector evaluation or the reconcile
-sweep consuming a meaningful share of its frame or latency budget.
+sweep consuming a meaningful share of its frame or latency budget — the p95
+commit column is the one to watch, not the median.
 
 **Evidence.** `bench/RESULTS.md`.

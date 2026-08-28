@@ -133,17 +133,37 @@ export interface LifetimeOptions<
    * required provider capabilities in its environment. Returning a
    * `Context.Context<_>` publishes those services to children and dependents.
    *
-   * The family's semantic key type is inferred from this parameter, and
-   * semantic key identity is Effect's own: `Equal.equals` and `Hash.hash`.
-   * Primitives work as themselves; a structural key should be an Effect data
-   * value (`Data.Class`, `Data.struct`, …) or anything else implementing
-   * `Equal`, exactly as for `RcMap` and the Effect collections.
+   * The family's semantic key type is inferred from this parameter, so it must
+   * be annotated — write `(_: null)` for a family whose key carries no
+   * information. An un-inferable key type is rejected rather than silently
+   * widening to `unknown`, which would let a Binding desire anything at all
+   * for this family.
+   *
+   * Semantic key identity is Effect's own, `Equal.equals` with `Hash.hash`:
+   * primitives, plain objects, arrays, class instances and `Data` values all
+   * compare structurally, exactly as for `RcMap` and the Effect collections.
+   * Two rules follow, and neither is checked at runtime:
+   *
+   * - **Keys must be immutable.** Identity is cached per key, so mutating a
+   *   key value after it has been desired corrupts the identity it was
+   *   admitted under.
+   * - **Keys must compare stably.** A value compared by reference (a plain
+   *   function, or anything wrapped in `Equal.byReference`) is a valid key
+   *   only if the Binding yields the *same* value each commit; a freshly
+   *   built one replaces the lifetime every time.
    *
    * Whatever it requires beyond `Scope`, its ancestors and its providers is a
    * root-environment requirement and surfaces on `Reconciler.make`.
    */
   readonly start: (key: K) => Effect.Effect<A, E, R>
 }
+
+/**
+ * Returned in place of a handle when a family's key type could not be
+ * inferred, so the mistake is reported where the handle is used.
+ */
+export type KeyMustBeAnnotated =
+  "effect-reconciler: annotate the key parameter of `start`, for example `start: (key: string) => …`, or `start: (_: null) => …` when the key carries no information"
 
 export interface DefineApi {
   readonly one: <
@@ -156,13 +176,14 @@ export interface DefineApi {
   >(
     name: string,
     options: LifetimeOptions<K, A, E, R, O, Req>
-  ) => OneHandle<
-    K,
-    OwnerRefFor<O>,
-    Published<A>,
-    ChildEnvOf<O> | Published<A>,
-    Exclude<R, StartEnv<O, Req>>
-  >
+  ) => [unknown] extends [K] ? KeyMustBeAnnotated
+    : OneHandle<
+      K,
+      OwnerRefFor<O>,
+      Published<A>,
+      ChildEnvOf<O> | Published<A>,
+      Exclude<R, StartEnv<O, Req>>
+    >
   readonly many: <
     K,
     A,
@@ -173,13 +194,14 @@ export interface DefineApi {
   >(
     name: string,
     options: LifetimeOptions<K, A, E, R, O, Req>
-  ) => ManyHandle<
-    K,
-    OwnerRefFor<O>,
-    Published<A>,
-    ChildEnvOf<O> | Published<A>,
-    Exclude<R, StartEnv<O, Req>>
-  >
+  ) => [unknown] extends [K] ? KeyMustBeAnnotated
+    : ManyHandle<
+      K,
+      OwnerRefFor<O>,
+      Published<A>,
+      ChildEnvOf<O> | Published<A>,
+      Exclude<R, StartEnv<O, Req>>
+    >
 }
 
 // -----------------------------------------------------------------------------

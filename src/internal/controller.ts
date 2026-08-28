@@ -573,8 +573,11 @@ export const makeController = <State>(
      * generation already retiring.
      */
     const retry = (ref: LifetimeRef): Effect.Effect<void, ControllerClosed> =>
-      Effect.uninterruptible(
-        mutex.withPermits(1)(
+      // Waiting for the mutex is interruptible and retires nothing; only the
+      // retirement itself is atomic. The linearization point is the same as
+      // `commit`'s: entry into the masked region.
+      mutex.withPermits(1)(
+        Effect.uninterruptible(
           Effect.suspend((): Effect.Effect<void, ControllerClosed> => {
             if (!open) return Effect.fail(new ControllerClosed())
             const ident = identOf(ref)

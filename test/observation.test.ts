@@ -28,11 +28,11 @@ describe("status", () => {
       let failing = false
       const Def = Reconciler.define((define) => {
         const Owner = define.one("Owner", {
-          start: () => Deferred.await(ownerGate)
+          start: (_id: string) => Deferred.await(ownerGate)
         })
         const Res = define.one("Res", {
           owner: Owner,
-          start: () =>
+          start: (_key: string) =>
             Effect.gen(function* () {
               yield* Effect.addFinalizer(() => Deferred.await(stopGate))
               yield* Deferred.await(startGate)
@@ -94,7 +94,7 @@ describe("status", () => {
     Effect.gen(function* () {
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
-          start: () => new StartupFailed({ reason: "boom" })
+          start: (_key: string) => new StartupFailed({ reason: "boom" })
         })
       }))
       const controller = yield* Reconciler.make(
@@ -157,7 +157,7 @@ describe("failure stream", () => {
     Effect.gen(function* () {
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
-          start: () => new StartupFailed({ reason: "boom" })
+          start: (_key: string) => new StartupFailed({ reason: "boom" })
         })
       }))
       const controller = yield* Reconciler.make(
@@ -182,7 +182,7 @@ describe("failure stream", () => {
     Effect.gen(function* () {
       const Def = Reconciler.define((define) => ({
         Res: define.many("Res", {
-          start: () => new StartupFailed({ reason: "boom" })
+          start: (_key: string) => new StartupFailed({ reason: "boom" })
         })
       }))
       const controller = yield* Reconciler.make(

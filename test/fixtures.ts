@@ -111,7 +111,7 @@ export const makeEditor = (log: Array<string>) => {
     const Diagnostics = define.one("Diagnostics", {
       owner: Document,
       requires: { settings: Settings, language: Language },
-      start: () =>
+      start: (_: null) =>
         Effect.gen(function* () {
           const settings = yield* SettingsService
           const language = yield* LanguageService

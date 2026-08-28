@@ -69,11 +69,11 @@ const makeEditor = (counters: Counters) => {
       start: (revision: number) => started(Context.make(SettingsService, { revision }))
     })
     const Session = define.one("Session", {
-      start: () => started(undefined)
+      start: (_key: string) => started(undefined)
     })
     const Workspace = define.one("Workspace", {
       owner: Session,
-      start: () => started(undefined)
+      start: (_key: string) => started(undefined)
     })
     const Language = define.one("Language", {
       owner: Workspace,
@@ -86,7 +86,7 @@ const makeEditor = (counters: Counters) => {
     const Diagnostics = define.one("Diagnostics", {
       owner: Document,
       requires: { settings: Settings, language: Language },
-      start: () =>
+      start: (_: null) =>
         Effect.gen(function* () {
           // Ordinary capability access, as a real dependent would.
           yield* SettingsService
@@ -127,9 +127,7 @@ const bindEditor = (editor: ReturnType<typeof makeEditor>, counters: Counters) =
     })
   }))
 
-interface Row {
-  readonly documents: number
-  readonly scenario: string
+interface Sample {
   readonly commitMs: number
   readonly convergeMs: number
   readonly selectors: number
@@ -137,20 +135,41 @@ interface Row {
   readonly stops: number
 }
 
+interface Row {
+  readonly documents: number
+  readonly scenario: string
+  readonly samples: ReadonlyArray<Sample>
+}
+
 const rows: Array<Row> = []
 
+/** Nearest-rank percentile; with few samples a mean would hide the tail. */
+const percentile = (values: ReadonlyArray<number>, p: number): number => {
+  const sorted = [...values].sort((a, b) => a - b)
+  const rank = Math.max(1, Math.ceil((p / 100) * sorted.length))
+  return sorted[rank - 1]!
+}
+
 const report = () => {
-  const header = "| documents | scenario | commit ms | converge ms | selector evals | starts | stops |"
-  const divider = "| ---: | :--- | ---: | ---: | ---: | ---: | ---: |"
-  const body = rows.map((r) =>
-    `| ${r.documents} | ${r.scenario} | ${r.commitMs.toFixed(2)} | ${
-      r.convergeMs.toFixed(2)
-    } | ${r.selectors} | ${r.starts} | ${r.stops} |`
-  )
+  const header =
+    "| documents | scenario | commit p50 | commit p95 | converge p50 | converge p95 | selector evals | starts | stops |"
+  const divider = "| ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+  const body = rows.map((row) => {
+    const commits = row.samples.map((sample) => sample.commitMs)
+    const converges = row.samples.map((sample) => sample.convergeMs)
+    const last = row.samples[row.samples.length - 1]!
+    return `| ${row.documents} | ${row.scenario} | ${percentile(commits, 50).toFixed(2)} | ${
+      percentile(commits, 95).toFixed(2)
+    } | ${percentile(converges, 50).toFixed(2)} | ${
+      percentile(converges, 95).toFixed(2)
+    } | ${last.selectors} | ${last.starts} | ${last.stops} |`
+  })
   console.log(["", header, divider, ...body, ""].join("\n"))
 }
 
 const sizes = [100, 1_000, 10_000]
+/** Samples per scenario after a warm-up round, so the numbers are not one throw of the dice. */
+const samplesPerScenario = 7
 
 describe("scale", () => {
   for (const size of sizes) {
@@ -171,8 +190,8 @@ describe("scale", () => {
             documents
           }
 
-          /** One measured commit: latency, then convergence. */
-          const measure = function* (scenario: string, model: Model) {
+          /** One commit: latency at the caller's boundary, then convergence. */
+          const once = function* (model: Model) {
             counters.starts = 0
             counters.stops = 0
             counters.selectors = 0
@@ -181,62 +200,84 @@ describe("scale", () => {
             const t1 = performance.now()
             yield* idle(controller)
             const t2 = performance.now()
-            const row: Row = {
-              documents: size,
-              scenario,
+            const sample: Sample = {
               commitMs: t1 - t0,
               convergeMs: t2 - t1,
               selectors: counters.selectors,
               starts: counters.starts,
               stops: counters.stops
             }
-            rows.push(row)
-            return row
+            return sample
+          }
+
+          /**
+           * A scenario is a transition, so it is measured by going `there`
+           * repeatedly and returning via `back` in between. One warm round is
+           * discarded before sampling, and only the `there` direction counts.
+           */
+          const scenario = function* (name: string, there: Model, back: Model) {
+            yield* once(there)
+            yield* once(back)
+            const samples: Array<Sample> = []
+            for (let round = 0; round < samplesPerScenario; round++) {
+              samples.push(yield* once(there))
+              yield* once(back)
+            }
+            rows.push({ documents: size, scenario: name, samples })
+            return samples[samples.length - 1]!
           }
 
           // Cold build: Settings, Session, Workspace, Language, and a
-          // Document + Diagnostics pair per document.
-          const build = yield* measure("build", baseline)
+          // Document + Diagnostics pair per document. Measured once, because
+          // there is only ever one cold start.
+          const build = yield* once(baseline)
+          rows.push({ documents: size, scenario: "build (cold, one sample)", samples: [build] })
           expect(build.starts).toBe(2 * size + 4)
           expect(build.stops).toBe(0)
 
           // A — equivalent commit: churn must stay at exactly zero.
-          const equivalent = yield* measure("A equivalent commit", { ...baseline })
+          const equivalent = yield* scenario("A equivalent commit", { ...baseline }, {
+            ...baseline
+          })
           expect(equivalent.starts).toBe(0)
           expect(equivalent.stops).toBe(0)
 
           // B — one Document removed, one added: only that document and its
           // Diagnostics child move, whatever the scale.
           const churned = [...documents.slice(1), "file:///added.ts"]
-          const oneChanged = yield* measure("B one document changed", {
-            ...baseline,
-            documents: churned
-          })
+          const oneChanged = yield* scenario(
+            "B one document changed",
+            { ...baseline, documents: churned },
+            baseline
+          )
           expect(oneChanged.starts).toBe(2)
           expect(oneChanged.stops).toBe(2)
-          const afterB: Model = { ...baseline, documents: churned }
 
           // C — Settings replaced: every Diagnostics is rebound to the new
           // provider generation, and every Document is retained.
-          const settings = yield* measure("C settings replaced", {
-            ...afterB,
-            settingsRevision: 2
-          })
+          const settings = yield* scenario(
+            "C settings replaced",
+            { ...baseline, settingsRevision: 2 },
+            baseline
+          )
           expect(settings.starts).toBe(size + 1)
           expect(settings.stops).toBe(size + 1)
-          const afterC: Model = { ...afterB, settingsRevision: 2 }
 
           // D — Language replaced: the same selective invalidation.
-          const language = yield* measure("D language replaced", { ...afterC, language: "tsx" })
+          const language = yield* scenario(
+            "D language replaced",
+            { ...baseline, language: "tsx" },
+            baseline
+          )
           expect(language.starts).toBe(size + 1)
           expect(language.stops).toBe(size + 1)
-          const afterD: Model = { ...afterC, language: "tsx" }
 
           // E — Workspace replaced: the whole owned subtree, worst case.
-          const workspace = yield* measure("E workspace replaced", {
-            ...afterD,
-            workspaceId: "other"
-          })
+          const workspace = yield* scenario(
+            "E workspace replaced",
+            { ...baseline, workspaceId: "other" },
+            baseline
+          )
           expect(workspace.starts).toBe(2 * size + 2)
           expect(workspace.stops).toBe(2 * size + 2)
 

@@ -21,7 +21,7 @@ describe("startup failure", () => {
         })
         const Diagnostics = define.one("Diagnostics", {
           requires: { language: Language },
-          start: () =>
+          start: (_: null) =>
             Effect.gen(function* () {
               const language = yield* LanguageService
               log.push(`diagnostics:${language.language}`)
@@ -106,7 +106,7 @@ describe("startup failure", () => {
         })
         const Child = define.one("Child", {
           owner: Parent,
-          start: () => Effect.sync(() => log.push("child:start"))
+          start: (_: null) => Effect.sync(() => log.push("child:start"))
         })
         return { Parent, Child }
       })

@@ -70,7 +70,7 @@ describe("capability dependencies", () => {
           requires: { settings: Settings },
           // Overlap: D#2 may start while D#1 is still being torn down.
           replacement: Replacement.overlap(),
-          start: () =>
+          start: (_: null) =>
             Effect.gen(function* () {
               const settings = yield* SettingsService
               log.push(`dep:begin:s${settings.revision}`)
@@ -84,7 +84,7 @@ describe("capability dependencies", () => {
         // Only ever admitted beneath a Running Dep generation.
         const Probe = define.one("Probe", {
           owner: Dep,
-          start: () =>
+          start: (_: null) =>
             Effect.gen(function* () {
               const dep = yield* DepService
               log.push(`probe:s${dep.settingsRevision}`)
