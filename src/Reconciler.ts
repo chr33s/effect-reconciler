@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect"
-import type * as PubSub from "effect/PubSub"
+import type * as Option from "effect/Option"
+import type * as Stream from "effect/Stream"
 import type * as Scope from "effect/Scope"
 import type { BindApi, Binding, BindingEntry } from "./Binding.js"
 import {
@@ -55,7 +56,6 @@ export const define = <H extends Record<string, AnyHandle>>(
         name,
         identity,
         familyId: families.length,
-        key: options.key,
         owner: options.owner,
         requires: options.requires ?? {},
         replacement:
@@ -80,17 +80,22 @@ export const define = <H extends Record<string, AnyHandle>>(
   ): Binding<State, never> => {
     const api: BindApi<State> = {
       one: (handle, selector) => ({
+        label: "",
         handle: handle as AnyHandle,
         cardinality: "one",
         selector: selector as (state: State, owner: unknown) => unknown
       }),
       many: (handle, selector) => ({
+        label: "",
         handle: handle as AnyHandle,
         cardinality: "many",
         selector: selector as (state: State, owner: unknown) => unknown
       })
     }
-    return { source, entries: Object.values(bf(api)) }
+    // The record key is the name the application gave this selector, and the
+    // only name a foreign handle can be reported under.
+    const entries = Object.entries(bf(api)).map(([label, entry]) => ({ ...entry, label }))
+    return { source, entries }
   }
 
   return { ...handles, bind } as Defined<H>
@@ -115,13 +120,14 @@ export const ref = <H extends AnyHandle>(
  * replaces the authoritative desired snapshot; the runtime converges
  * asynchronously. It never awaits resource startup, shutdown or convergence.
  *
- * `failures` subscribes to the startup failures of lifetimes whose desire is
- * still current, so a control plane can surface them in its own model. Each
- * subscription is owned by the surrounding Scope and only receives failures
- * published while it is attached.
+ * `failures` is a live Stream of the startup failures of lifetimes whose
+ * desire is still current, so a control plane can surface them in its own
+ * model. Running it subscribes; only failures published while it runs are
+ * delivered, and the buffer drops the oldest under overflow.
  *
  * `status` answers authoritatively what the runtime currently knows about one
  * semantic lifetime; unlike a failure notification it cannot be missed.
+ * `None` means no physical generation exists for that identity.
  *
  * `retry(ref)` retires a Failed generation so a fresh one may be admitted
  * under the same semantic key, without the application inventing a retry
@@ -132,8 +138,8 @@ export const ref = <H extends AnyHandle>(
  */
 export interface Controller<in State> {
   readonly commit: (state: State) => Effect.Effect<void, CommitError>
-  readonly failures: Effect.Effect<PubSub.Subscription<LifetimeFailure>, never, Scope.Scope>
-  readonly status: (ref: LifetimeRef) => Effect.Effect<LifetimeStatus>
+  readonly failures: Stream.Stream<LifetimeFailure>
+  readonly status: (ref: LifetimeRef) => Effect.Effect<Option.Option<LifetimeStatus>>
   readonly retry: (ref: LifetimeRef) => Effect.Effect<void, ControllerClosed>
   readonly shutdown: Effect.Effect<void>
 }

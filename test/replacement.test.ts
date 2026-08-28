@@ -1,6 +1,5 @@
 import { Context, Deferred, Effect, Option } from "effect"
 import { describe, expect, it } from "@effect/vitest"
-import * as Key from "../src/Key.js"
 import * as Reconciler from "../src/Reconciler.js"
 import * as Replacement from "../src/Replacement.js"
 import { SettingsService } from "./fixtures.js"
@@ -13,7 +12,6 @@ describe("replacement", () => {
       const stopGate = yield* Deferred.make<void>()
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
-          key: Key.string,
           replacement: Replacement.sequential(),
           start: (k: string) =>
             Effect.gen(function* () {
@@ -59,7 +57,6 @@ describe("replacement", () => {
       const stopGate = yield* Deferred.make<void>()
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
-          key: Key.string,
           replacement: Replacement.overlap(),
           start: (k: string) =>
             Effect.gen(function* () {
@@ -99,18 +96,15 @@ describe("replacement", () => {
       const childStopGate = yield* Deferred.make<void>()
       const Def = Reconciler.define((define) => {
         const Settings = define.one("Settings", {
-          key: Key.number,
           start: (revision: number) =>
             Effect.succeed(Context.make(SettingsService, { revision }))
         })
         const Owner = define.one("Owner", {
-          key: Key.string,
           requires: { settings: Settings },
           replacement: Replacement.overlap(),
-          start: () => Effect.void
+          start: (_id: string) => Effect.void
         })
         const Child = define.one("Child", {
-          key: Key.string,
           owner: Owner,
           replacement: Replacement.sequential(),
           start: (k: string) =>
@@ -160,7 +154,6 @@ describe("replacement", () => {
       const releaseGate = yield* Deferred.make<void>()
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
-          key: Key.string,
           replacement: Replacement.sequential(),
           start: (k: string) =>
             Effect.gen(function* () {

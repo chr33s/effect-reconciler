@@ -1,7 +1,6 @@
 import type * as Context from "effect/Context"
 import type * as Effect from "effect/Effect"
 import type * as Scope from "effect/Scope"
-import type { Key } from "./Key.js"
 import type { LifetimeRef } from "./LifetimeRef.js"
 import type { ReplacementPolicy } from "./Replacement.js"
 
@@ -122,7 +121,6 @@ export interface LifetimeOptions<
   O extends AnyHandle,
   Req extends Record<string, AnyHandle>
 > {
-  readonly key: Key<K>
   /** The owning family; omitted for root families. */
   readonly owner?: O
   /** Named capability requirements satisfied by other lifetime families. */
@@ -134,6 +132,12 @@ export interface LifetimeOptions<
    * Scope, the root environment, all ancestor-provided capabilities and all
    * required provider capabilities in its environment. Returning a
    * `Context.Context<_>` publishes those services to children and dependents.
+   *
+   * The family's semantic key type is inferred from this parameter, and
+   * semantic key identity is Effect's own: `Equal.equals` and `Hash.hash`.
+   * Primitives work as themselves; a structural key should be an Effect data
+   * value (`Data.Class`, `Data.struct`, …) or anything else implementing
+   * `Equal`, exactly as for `RcMap` and the Effect collections.
    *
    * Whatever it requires beyond `Scope`, its ancestors and its providers is a
    * root-environment requirement and surfaces on `Reconciler.make`.
@@ -196,7 +200,6 @@ export interface InternalHandle {
   readonly identity: DefinitionIdentity
   /** Index of this family within its own Definition, in creation order. */
   readonly familyId: number
-  readonly key: Key<any>
   readonly owner: AnyHandle | undefined
   readonly requires: Readonly<Record<string, AnyHandle>>
   readonly replacement: "sequential" | "overlap"

@@ -3,7 +3,6 @@
  * bound to two different control-state types.
  */
 import { Context, Effect, Option } from "effect"
-import * as Key from "../src/Key.js"
 import * as Reconciler from "../src/Reconciler.js"
 import * as Replacement from "../src/Replacement.js"
 
@@ -29,22 +28,19 @@ class DocumentService extends Context.Service<
 
 export const Editor = Reconciler.define((define) => {
   const Settings = define.one("Settings", {
-    key: Key.number,
-    start: (settingsRevision) =>
+    start: (settingsRevision: number) =>
       Effect.succeed(Context.make(SettingsService, { revision: settingsRevision }))
   })
 
   const Session = define.one("Session", {
-    key: Key.string,
     replacement: Replacement.overlap(),
-    start: (userId) => Effect.succeed(Context.make(SessionService, { userId }))
+    start: (userId: string) => Effect.succeed(Context.make(SessionService, { userId }))
   })
 
   const Workspace = define.one("Workspace", {
-    key: Key.string,
     owner: Session,
     replacement: Replacement.sequential(),
-    start: (workspaceId) =>
+    start: (workspaceId: string) =>
       Effect.gen(function* () {
         const session = yield* SessionService
         yield* Effect.log(`workspace ${workspaceId} opened for ${session.userId}`)
@@ -53,22 +49,19 @@ export const Editor = Reconciler.define((define) => {
   })
 
   const Language = define.one("Language", {
-    key: Key.string,
     owner: Workspace,
-    start: (language) => Effect.succeed(Context.make(LanguageService, { language }))
+    start: (language: string) => Effect.succeed(Context.make(LanguageService, { language }))
   })
 
   const Document = define.many("Document", {
-    key: Key.string,
     owner: Workspace,
-    start: (uri) => Effect.succeed(Context.make(DocumentService, { uri }))
+    start: (uri: string) => Effect.succeed(Context.make(DocumentService, { uri }))
   })
 
   const Diagnostics = define.one("Diagnostics", {
-    key: Key.null,
     owner: Document,
     requires: { settings: Settings, language: Language },
-    start: () =>
+    start: (_: null) =>
       Effect.gen(function* () {
         // Ordinary Effect code: required capabilities are ordinary services.
         const settings = yield* SettingsService

@@ -2,23 +2,19 @@
  * Phase 1 type-misuse checks. This file is compiled by `tsc --noEmit`; every
  * `@ts-expect-error` line asserts that the API rejects the misuse statically.
  */
-import { Context, Effect, Option } from "effect"
-import * as Key from "../src/Key.js"
+import { Context, Data, Effect, Option } from "effect"
 import type { LifetimeRef } from "../src/LifetimeRef.js"
 import * as Reconciler from "../src/Reconciler.js"
 
 const Def = Reconciler.define((define) => {
   const Session = define.one("Session", {
-    key: Key.string,
     start: (userId: string) => Effect.succeed(userId)
   })
   const Workspace = define.one("Workspace", {
-    key: Key.string,
     owner: Session,
     start: (workspaceId: string) => Effect.succeed(workspaceId)
   })
   const Document = define.many("Document", {
-    key: Key.string,
     owner: Workspace,
     start: (uri: string) => Effect.succeed(uri)
   })
@@ -78,11 +74,9 @@ Def.bind<State>((bind) => ({
 
 Reconciler.define((define) => {
   const Session = define.one("Session", {
-    key: Key.string,
     start: (userId: string) => Effect.succeed(userId)
   })
   const Bad = define.one("Bad", {
-    key: Key.string,
     owner: Session,
     // @ts-expect-error — the start key is a string, not a number
     start: (key) => Effect.succeed(Math.abs(key))
@@ -108,15 +102,12 @@ class SessionService extends Context.Service<
 // Definition asks nothing of the root environment.
 const Wired = Reconciler.define((define) => {
   const Settings = define.one("Settings", {
-    key: Key.number,
     start: (revision: number) => Effect.succeed(Context.make(SettingsService, { revision }))
   })
   const Session = define.one("Session", {
-    key: Key.string,
     start: (userId: string) => Effect.succeed(Context.make(SessionService, { userId }))
   })
   const Child = define.one("Child", {
-    key: Key.null,
     owner: Session,
     requires: { settings: Settings },
     start: () =>
@@ -145,11 +136,9 @@ Effect.runPromise(
 // `requires` is a root-environment requirement of the Controller (§60).
 const Unmet = Reconciler.define((define) => {
   const Settings = define.one("Settings", {
-    key: Key.number,
     start: (revision: number) => Effect.succeed(Context.make(SettingsService, { revision }))
   })
   const Loose = define.one("Loose", {
-    key: Key.null,
     // No `owner`, no `requires`: Settings is a sibling, not a provider.
     start: () => Effect.service(SettingsService)
   })
@@ -176,3 +165,50 @@ Effect.runPromise(
     )
   )
 )
+
+// -----------------------------------------------------------------------------
+// Key inference (spec.3 §8, §45)
+// -----------------------------------------------------------------------------
+
+class WorkspaceKey extends Data.Class<{
+  readonly organizationId: string
+  readonly workspaceId: string
+}> {}
+
+const Keyed = Reconciler.define((define) => {
+  // The semantic key type is inferred from `start`; no key descriptor exists.
+  const Primitive = define.one("Primitive", { start: (revision: number) => Effect.void })
+  const Structural = define.many("Structural", {
+    start: (key: WorkspaceKey) => Effect.succeed(key.workspaceId)
+  })
+  const Singleton = define.one("Singleton", { start: (_: null) => Effect.void })
+  return { Primitive, Structural, Singleton }
+})
+
+interface KeyedState {
+  readonly revision: number
+  readonly workspaces: ReadonlyArray<WorkspaceKey>
+}
+
+// Primitive and Effect data keys both bind without ceremony.
+Keyed.bind<KeyedState>((bind) => ({
+  primitive: bind.one(Keyed.Primitive, (s) => Option.some(s.revision)),
+  structural: bind.many(Keyed.Structural, (s) => s.workspaces),
+  singleton: bind.one(Keyed.Singleton, () => Option.some(null))
+}))
+
+Keyed.bind<KeyedState>((bind) => ({
+  // @ts-expect-error — the key is a number, not a string
+  primitive: bind.one(Keyed.Primitive, () => Option.some("1"))
+}))
+
+Keyed.bind<KeyedState>((bind) => ({
+  // @ts-expect-error — a bare object is not the declared data key
+  structural: bind.many(Keyed.Structural, () => [{ organizationId: "a", workspaceId: "b" }])
+}))
+
+// A semantic reference is typed by the family it names.
+Reconciler.ref(Keyed.Structural, new WorkspaceKey({ organizationId: "a", workspaceId: "b" }), null)
+
+// @ts-expect-error — wrong key type for this family
+Reconciler.ref(Keyed.Primitive, "1", null)

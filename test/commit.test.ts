@@ -1,6 +1,5 @@
 import { Deferred, Effect, Fiber, Option } from "effect"
 import { describe, expect, it } from "@effect/vitest"
-import * as Key from "../src/Key.js"
 import * as Reconciler from "../src/Reconciler.js"
 import { eventually, holding, idle, TestTimeout } from "./util.js"
 
@@ -11,7 +10,6 @@ describe("commit", () => {
       const never = yield* Deferred.make<void>()
       const Def = Reconciler.define((define) => ({
         Slow: define.one("Slow", {
-          key: Key.string,
           start: (k: string) =>
             Effect.gen(function* () {
               log.push(`begin:${k}`)
@@ -41,7 +39,6 @@ describe("commit", () => {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => ({
         Doc: define.many("Doc", {
-          key: Key.string,
           start: (k: string) =>
             Effect.gen(function* () {
               log.push(`start:${k}`)
@@ -79,7 +76,6 @@ describe("commit", () => {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
-          key: Key.string,
           start: (k: string) =>
             Effect.gen(function* () {
               log.push(`start:${k}`)
@@ -122,7 +118,6 @@ describe("commit", () => {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
-          key: Key.string,
           start: (k: string) => Effect.sync(() => log.push(`start:${k}`))
         })
       }))
@@ -163,7 +158,6 @@ describe("commit", () => {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
-          key: Key.string,
           start: (k: string) => Effect.sync(() => log.push(`start:${k}`))
         })
       }))
@@ -190,7 +184,6 @@ describe("commit", () => {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
-          key: Key.string,
           start: (k: string) => Effect.sync(() => log.push(`start:${k}`))
         })
       }))
@@ -231,7 +224,6 @@ describe("commit", () => {
       const live = new Set<string>()
       const Def = Reconciler.define((define) => ({
         Doc: define.many("Doc", {
-          key: Key.string,
           start: (uri: string) =>
             Effect.gen(function* () {
               live.add(uri)

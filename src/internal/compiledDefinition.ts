@@ -10,8 +10,20 @@ import {
   type DefinitionIdentity,
   type DefinitionSource
 } from "../Definition.js"
-import { BindingError, DefinitionError } from "../Errors.js"
-import type { Key } from "../Key.js"
+import {
+  AmbiguousProvider,
+  CapabilityCycle,
+  CardinalityMismatch,
+  DuplicateBinding,
+  ForeignHandle,
+  ForeignOwner,
+  ForeignRequirement,
+  MissingBinding,
+  OwnershipCycle,
+  UnresolvableProvider,
+  type BindingError,
+  type DefinitionError
+} from "../Errors.js"
 
 /**
  * How a named requirement resolves for a desired/live instance:
@@ -37,7 +49,6 @@ export interface CompiledFamily {
   /** The public handle: the family's authoritative semantic identity. */
   readonly handle: AnyHandle
   readonly cardinality: "one" | "many"
-  readonly key: Key<any>
   readonly ownerId: number | null
   /** Family ids from root family to this family (inclusive). */
   readonly chain: ReadonlyArray<number>
@@ -68,16 +79,12 @@ export const compileDefinition = (
     if (handle.owner !== undefined) {
       if (!isHandle(handle.owner) || asInternal(handle.owner).identity !== source.identity) {
         return Result.fail(
-          new DefinitionError({
-            reason: `owner of "${handle.name}" is not a lifetime handle from this definition`
-          })
+          new ForeignOwner({ family: handle as unknown as AnyHandle })
         )
       }
       const owner = asInternal(handle.owner)
       if (owner.familyId >= handle.familyId) {
-        return Result.fail(
-          new DefinitionError({ reason: `ownership cycle involving "${handle.name}"` })
-        )
+        return Result.fail(new OwnershipCycle({ family: handle as unknown as AnyHandle }))
       }
       ownerId = owner.familyId
       chain = [...families[ownerId]!.chain, handle.familyId]
@@ -90,21 +97,25 @@ export const compileDefinition = (
     for (const [name, requirement] of Object.entries(handle.requires)) {
       if (!isHandle(requirement) || asInternal(requirement).identity !== source.identity) {
         return Result.fail(
-          new DefinitionError({
-            reason: `requirement "${name}" of "${handle.name}" is not a lifetime handle from this definition`
-          })
+          new ForeignRequirement({ family: handle as unknown as AnyHandle, requirement: name })
         )
       }
       const provider = asInternal(requirement)
       if (provider.familyId === handle.familyId) {
         return Result.fail(
-          new DefinitionError({ reason: `"${handle.name}" cannot require itself` })
+          new CapabilityCycle({
+            family: handle as unknown as AnyHandle,
+            requirement: name,
+            provider: handle as unknown as AnyHandle
+          })
         )
       }
       if (provider.familyId > handle.familyId) {
         return Result.fail(
-          new DefinitionError({
-            reason: `capability cycle: "${handle.name}" requires "${provider.name}" which was defined later`
+          new CapabilityCycle({
+            family: handle as unknown as AnyHandle,
+            requirement: name,
+            provider: requirement as AnyHandle
           })
         )
       }
@@ -121,19 +132,19 @@ export const compileDefinition = (
         const providerOwnerChain = providerFamily.chain.slice(0, -1)
         if (!isPrefix(providerOwnerChain, ownerChain)) {
           return Result.fail(
-            new DefinitionError({
-              reason:
-                `requirement "${name}" of "${handle.name}" cannot be resolved: ` +
-                `provider "${providerFamily.name}" is not owned by an ancestor of "${handle.name}"`
+            new UnresolvableProvider({
+              family: handle as unknown as AnyHandle,
+              requirement: name,
+              provider: providerFamily.handle
             })
           )
         }
         if (providerFamily.cardinality !== "one") {
           return Result.fail(
-            new DefinitionError({
-              reason:
-                `requirement "${name}" of "${handle.name}" is ambiguous: ` +
-                `provider "${providerFamily.name}" has many cardinality`
+            new AmbiguousProvider({
+              family: handle as unknown as AnyHandle,
+              requirement: name,
+              provider: providerFamily.handle
             })
           )
         }
@@ -151,7 +162,6 @@ export const compileDefinition = (
       name: handle.name,
       handle: handle as unknown as AnyHandle,
       cardinality: handle[HandleTypeId],
-      key: handle.key,
       ownerId,
       chain,
       requires,
@@ -169,30 +179,26 @@ export const compileBinding = <State>(
   const entries = new Map<number, BindingEntry<State>>()
   for (const entry of binding.entries) {
     if (!isHandle(entry.handle) || asInternal(entry.handle).identity !== binding.source.identity) {
-      return Result.fail(
-        new BindingError({
-          reason: "binding references a lifetime handle that does not belong to this definition"
-        })
-      )
+      return Result.fail(new ForeignHandle({ label: entry.label }))
     }
     const internal = asInternal(entry.handle)
     if (internal[HandleTypeId] !== entry.cardinality) {
       return Result.fail(
-        new BindingError({
-          reason: `"${internal.name}": bind.${entry.cardinality} used with a "${internal[HandleTypeId]}" definition`
+        new CardinalityMismatch({
+          family: entry.handle,
+          declared: internal[HandleTypeId],
+          used: entry.cardinality
         })
       )
     }
     if (entries.has(internal.familyId)) {
-      return Result.fail(
-        new BindingError({ reason: `duplicate binding for "${internal.name}"` })
-      )
+      return Result.fail(new DuplicateBinding({ family: entry.handle }))
     }
     entries.set(internal.familyId, entry)
   }
   for (const family of compiled.families) {
     if (!entries.has(family.id)) {
-      return Result.fail(new BindingError({ reason: `missing binding for "${family.name}"` }))
+      return Result.fail(new MissingBinding({ family: family.handle }))
     }
   }
   return Result.succeed(entries)

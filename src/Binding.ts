@@ -10,6 +10,8 @@ import type { AnyHandle, DefinitionSource, ManyHandle, OneHandle } from "./Defin
  * runtime state, or inspect live physical generations.
  */
 export interface BindingEntry<in State> {
+  /** The key this selector had in the Binding record, for diagnostics. */
+  readonly label: string
   readonly handle: AnyHandle
   readonly cardinality: "one" | "many"
   readonly selector: (state: State, owner: unknown) => unknown

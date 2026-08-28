@@ -1,5 +1,6 @@
-import { Data, Effect } from "effect"
+import { Data, Effect, Option, Queue, Stream, type Cause, type Scope } from "effect"
 import { TestHooksId, type TestHooks } from "../src/internal/controller.js"
+import type { LifetimeFailure } from "../src/Failure.js"
 import type { LifetimeRef } from "../src/LifetimeRef.js"
 import type * as Reconciler from "../src/Reconciler.js"
 import type { LifetimeStatus } from "../src/Status.js"
@@ -55,6 +56,46 @@ export const eventually = (
  * an event while a lifetime is deliberately wedged, or after shutdown has
  * stopped the reconcile loop, where no convergence barrier can exist.
  */
+/**
+ * Subscribe to a Controller's live failure Stream, returning a queue the test
+ * can pull from. Subscribing eagerly (rather than folding the Stream in a
+ * forked fiber) means a commit made after this returns cannot race the
+ * subscription.
+ */
+export const failureQueue = <State>(
+  controller: Reconciler.Controller<State>,
+  options: { readonly capacity: number; readonly strategy?: "dropping" | "sliding" } = {
+    capacity: 512
+  }
+): Effect.Effect<Queue.Dequeue<LifetimeFailure, Cause.Done>, never, Scope.Scope> =>
+  Stream.toQueue(controller.failures, options)
+
+/** Everything currently queued for a failure subscription. */
+export const drainFailures = (
+  queue: Queue.Dequeue<LifetimeFailure, Cause.Done>
+): Effect.Effect<Array<LifetimeFailure>> =>
+  Effect.gen(function* () {
+    const received: Array<LifetimeFailure> = []
+    while (true) {
+      const next = yield* Effect.timeoutOption(Effect.result(Queue.take(queue)), 20)
+      if (Option.isNone(next) || next.value._tag === "Failure") return received
+      const failure = next.value.success
+      // A sliding queue can surface an empty slot when it dropped underneath
+      // a pending take; that is the loss being tested, not an item.
+      if (failure !== undefined) received.push(failure)
+    }
+  })
+
+/** The status tag of one lifetime, or `"None"` when no generation exists. */
+export const statusTag = <State>(
+  controller: Reconciler.Controller<State>,
+  ref: LifetimeRef
+): Effect.Effect<LifetimeStatus["_tag"] | "None"> =>
+  Effect.map(
+    controller.status(ref),
+    Option.match({ onNone: () => "None" as const, onSome: (status) => status._tag })
+  )
+
 /** Poll `controller.status(ref)` until it reports `tag`. */
 export const awaitStatus = <State>(
   controller: Reconciler.Controller<State>,
@@ -63,7 +104,7 @@ export const awaitStatus = <State>(
 ): Effect.Effect<void, TestTimeout> => {
   const loop: Effect.Effect<void> = Effect.gen(function* () {
     const status = yield* controller.status(ref)
-    if (status._tag === tag) return
+    if (Option.isSome(status) && status.value._tag === tag) return
     yield* Effect.sleep(2)
     yield* loop
   })

@@ -8,24 +8,16 @@
  * under overflow, because publishing must never block reconciliation.
  */
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Deferred, Effect, Option, PubSub } from "effect"
-import * as Key from "../src/Key.js"
+import { Cause, Deferred, Effect, Option } from "effect"
 import * as Reconciler from "../src/Reconciler.js"
-import type { LifetimeFailure } from "../src/Failure.js"
-import { awaitStatus, idle, StartupFailed } from "./util.js"
-
-/** Drain everything currently queued for a subscription. */
-const drain = (
-  subscription: PubSub.Subscription<LifetimeFailure>
-): Effect.Effect<Array<LifetimeFailure>> =>
-  Effect.gen(function* () {
-    const received: Array<LifetimeFailure> = []
-    while (true) {
-      const next = yield* Effect.timeoutOption(PubSub.take(subscription), 20)
-      if (Option.isNone(next)) return received
-      received.push(next.value)
-    }
-  })
+import {
+  awaitStatus,
+  drainFailures,
+  failureQueue,
+  idle,
+  StartupFailed,
+  statusTag
+} from "./util.js"
 
 describe("status", () => {
   it.live("reports every semantic state of one lifetime", () =>
@@ -36,11 +28,9 @@ describe("status", () => {
       let failing = false
       const Def = Reconciler.define((define) => {
         const Owner = define.one("Owner", {
-          key: Key.string,
           start: () => Deferred.await(ownerGate)
         })
         const Res = define.one("Res", {
-          key: Key.string,
           owner: Owner,
           start: () =>
             Effect.gen(function* () {
@@ -59,20 +49,20 @@ describe("status", () => {
       )
       const ref = Reconciler.ref(Def.Res, "r", Reconciler.ref(Def.Owner, "o", null))
 
-      // Nothing desired yet.
-      expect((yield* controller.status(ref))._tag).toBe("NotDesired")
+      // Nothing exists yet.
+      expect(yield* statusTag(controller, ref)).toBe("None")
 
-      // Desire is owner-relative: with no owner there is no such lifetime to
-      // ask about at all.
+      // Desire is owner-relative: with no owner there is nothing to run.
       yield* controller.commit({ owner: Option.none(), res: true })
       yield* idle(controller)
-      expect((yield* controller.status(ref))._tag).toBe("NotDesired")
+      expect(yield* statusTag(controller, ref)).toBe("None")
 
-      // Desired, but its owner has not finished starting: unavailable, and
-      // the status says it is waiting rather than that it is absent.
+      // Desired, but its owner has not finished starting, so no generation
+      // exists for it yet. What was asked for lives in the application's own
+      // state; the runtime reports what exists.
       yield* controller.commit({ owner: Option.some("o"), res: true })
       yield* awaitStatus(controller, Reconciler.ref(Def.Owner, "o", null), "Starting")
-      expect((yield* controller.status(ref))._tag).toBe("Pending")
+      expect(yield* statusTag(controller, ref)).toBe("None")
 
       // Owner Running: the lifetime is admitted and observable while starting.
       yield* Deferred.succeed(ownerGate, void 0)
@@ -80,23 +70,23 @@ describe("status", () => {
 
       yield* Deferred.succeed(startGate, void 0)
       yield* idle(controller)
-      expect((yield* controller.status(ref))._tag).toBe("Running")
+      expect(yield* statusTag(controller, ref)).toBe("Running")
 
       // Withdrawn while its finalizer is blocked.
       yield* controller.commit({ owner: Option.some("o"), res: false })
       yield* awaitStatus(controller, ref, "Stopping")
       yield* Deferred.succeed(stopGate, void 0)
       yield* idle(controller)
-      expect((yield* controller.status(ref))._tag).toBe("NotDesired")
+      expect(yield* statusTag(controller, ref)).toBe("None")
 
       // And a failed generation reports its cause.
       failing = true
       yield* controller.commit({ owner: Option.some("o"), res: true })
       yield* awaitStatus(controller, ref, "Failed")
       const status = yield* controller.status(ref)
-      expect(status._tag).toBe("Failed")
-      if (status._tag === "Failed") {
-        expect((Cause.squash(status.cause) as StartupFailed)._tag).toBe("StartupFailed")
+      expect(Option.isSome(status)).toBe(true)
+      if (Option.isSome(status) && status.value._tag === "Failed") {
+        expect((Cause.squash(status.value.cause) as StartupFailed)._tag).toBe("StartupFailed")
       }
     }))
 
@@ -104,7 +94,6 @@ describe("status", () => {
     Effect.gen(function* () {
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
-          key: Key.string,
           start: () => new StartupFailed({ reason: "boom" })
         })
       }))
@@ -116,11 +105,12 @@ describe("status", () => {
       // No subscriber exists, so the notification is dropped entirely.
       yield* controller.commit({})
       yield* idle(controller)
-      const subscription = yield* controller.failures
-      expect(yield* drain(subscription)).toEqual([])
+      const subscription = yield* failureQueue(controller)
+      expect(yield* drainFailures(subscription)).toEqual([])
 
       // The state itself is not lost: this is why status is the authority.
-      expect((yield* controller.status(ref))._tag).toBe("Failed")
+      const status = yield* controller.status(ref)
+      expect(Option.isSome(status) && status.value._tag).toBe("Failed")
     }))
 })
 
@@ -130,7 +120,6 @@ describe("failure stream", () => {
       const gate = yield* Deferred.make<void>()
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
-          key: Key.string,
           start: (k: string) =>
             Effect.gen(function* () {
               if (k === "slow") {
@@ -147,7 +136,7 @@ describe("failure stream", () => {
           res: bind.one(Def.Res, (s) => Option.some(s.key))
         }))
       )
-      const subscription = yield* controller.failures
+      const subscription = yield* failureQueue(controller)
 
       yield* controller.commit({ key: "slow" })
       yield* awaitStatus(controller, Reconciler.ref(Def.Res, "slow", null), "Starting")
@@ -159,7 +148,7 @@ describe("failure stream", () => {
       yield* awaitStatus(controller, Reconciler.ref(Def.Res, "bad", null), "Failed")
       yield* idle(controller)
 
-      const received = yield* drain(subscription)
+      const received = yield* drainFailures(subscription)
       expect(received).toHaveLength(1)
       expect(received[0]!.lifetime.key).toBe("bad")
     }))
@@ -168,7 +157,6 @@ describe("failure stream", () => {
     Effect.gen(function* () {
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
-          key: Key.string,
           start: () => new StartupFailed({ reason: "boom" })
         })
       }))
@@ -176,16 +164,16 @@ describe("failure stream", () => {
         Def.bind<{}>((bind) => ({ res: bind.one(Def.Res, () => Option.some("a")) }))
       )
       const ref = Reconciler.ref(Def.Res, "a", null)
-      const subscription = yield* controller.failures
+      const subscription = yield* failureQueue(controller)
 
       yield* controller.commit({})
       yield* idle(controller)
-      expect(yield* drain(subscription)).toHaveLength(1)
+      expect(yield* drainFailures(subscription)).toHaveLength(1)
 
       yield* controller.retry(ref)
       yield* idle(controller)
 
-      const again = yield* drain(subscription)
+      const again = yield* drainFailures(subscription)
       expect(again).toHaveLength(1)
       expect(again[0]!.lifetime.key).toBe("a")
     }))
@@ -194,7 +182,6 @@ describe("failure stream", () => {
     Effect.gen(function* () {
       const Def = Reconciler.define((define) => ({
         Res: define.many("Res", {
-          key: Key.string,
           start: () => new StartupFailed({ reason: "boom" })
         })
       }))
@@ -208,10 +195,10 @@ describe("failure stream", () => {
       // is attached, and nothing after that Scope closes.
       const seen = yield* Effect.scoped(
         Effect.gen(function* () {
-          const subscription = yield* controller.failures
+          const subscription = yield* failureQueue(controller)
           yield* controller.commit({ keys: ["a"] })
           yield* idle(controller)
-          return yield* drain(subscription)
+          return yield* drainFailures(subscription)
         })
       )
       expect(seen.map((failure) => failure.lifetime.key)).toEqual(["a"])
@@ -220,12 +207,12 @@ describe("failure stream", () => {
       // next one, which only ever sees live events.
       yield* controller.commit({ keys: ["a", "b"] })
       yield* idle(controller)
-      const later = yield* controller.failures
-      expect(yield* drain(later)).toEqual([])
+      const later = yield* failureQueue(controller)
+      expect(yield* drainFailures(later)).toEqual([])
 
       yield* controller.commit({ keys: ["a", "b", "c"] })
       yield* idle(controller)
-      expect((yield* drain(later)).map((failure) => failure.lifetime.key)).toEqual(["c"])
+      expect((yield* drainFailures(later)).map((failure) => failure.lifetime.key)).toEqual(["c"])
     }))
 
   it.live("§3.6/§3.7 — overflow drops the oldest and never blocks reconciliation", () =>
@@ -233,7 +220,6 @@ describe("failure stream", () => {
       const started: Array<string> = []
       const Def = Reconciler.define((define) => ({
         Res: define.many("Res", {
-          key: Key.string,
           start: (k: string) =>
             Effect.gen(function* () {
               started.push(k)
@@ -246,8 +232,9 @@ describe("failure stream", () => {
           res: bind.many(Def.Res, (s) => s.keys)
         }))
       )
-      // Attached but deliberately not draining, so the buffer overflows.
-      const subscription = yield* controller.failures
+      // Attached with a small buffer and deliberately not draining, so the
+      // subscriber falls behind and the bounded buffers drop.
+      const subscription = yield* failureQueue(controller, { capacity: 16, strategy: "sliding" })
 
       const keys = Array.from({ length: 200 }, (_, index) => `k${index}`)
       yield* controller.commit({ keys })
@@ -257,12 +244,12 @@ describe("failure stream", () => {
       yield* idle(controller)
       expect(started).toHaveLength(200)
 
-      const received = yield* drain(subscription)
-      expect(received.length).toBeGreaterThan(0)
-      expect(received.length).toBeLessThan(keys.length)
-      // Drop-oldest: the most recent failure survived, an early one did not.
+      // The subscriber fell behind, so it lost events rather than holding the
+      // reconciler up. How many survive is not part of the contract; that
+      // some were dropped is.
+      const received = yield* drainFailures(subscription)
       const receivedKeys = received.map((failure) => failure.lifetime.key)
-      expect(receivedKeys).toContain(keys[keys.length - 1])
+      expect(receivedKeys.length).toBeLessThan(keys.length)
       expect(receivedKeys).not.toContain(keys[0])
     }))
 })

@@ -7,26 +7,30 @@ know which of those, if any, a real workload actually needs.
 
 Recorded 2026-08-28 · Node v24.18.1 · darwin arm64 · Apple M5 Max.
 
+Semantic identity is Effect's `Equal` / `Hash` over ordinary key values. The
+table below is the current implementation; the identity comparison that
+justified switching to it is at the end.
+
 | documents | scenario | commit ms | converge ms | selector evals | starts | stops |
 | ---: | :--- | ---: | ---: | ---: | ---: | ---: |
-| 100 | build | 0.40 | 4.12 | 105 | 204 | 0 |
-| 100 | A equivalent commit | 0.14 | 1.50 | 105 | 0 | 0 |
-| 100 | B one document changed | 0.14 | 1.43 | 105 | 2 | 2 |
-| 100 | C settings replaced | 0.10 | 3.40 | 105 | 101 | 101 |
-| 100 | D language replaced | 0.16 | 1.87 | 105 | 101 | 101 |
-| 100 | E workspace replaced | 0.09 | 3.75 | 105 | 202 | 202 |
-| 1000 | build | 0.64 | 19.44 | 1005 | 2004 | 0 |
-| 1000 | A equivalent commit | 0.61 | 0.91 | 1005 | 0 | 0 |
-| 1000 | B one document changed | 0.59 | 2.24 | 1005 | 2 | 2 |
-| 1000 | C settings replaced | 0.62 | 14.25 | 1005 | 1001 | 1001 |
-| 1000 | D language replaced | 0.60 | 18.87 | 1005 | 1001 | 1001 |
-| 1000 | E workspace replaced | 0.60 | 20.24 | 1005 | 2002 | 2002 |
-| 10000 | build | 7.82 | 174.16 | 10005 | 20004 | 0 |
-| 10000 | A equivalent commit | 6.80 | 12.55 | 10005 | 0 | 0 |
-| 10000 | B one document changed | 10.27 | 21.68 | 10005 | 2 | 2 |
-| 10000 | C settings replaced | 10.92 | 163.36 | 10005 | 10001 | 10001 |
-| 10000 | D language replaced | 6.34 | 164.57 | 10005 | 10001 | 10001 |
-| 10000 | E workspace replaced | 10.42 | 201.47 | 10005 | 20002 | 20002 |
+| 100 | build | 0.71 | 4.41 | 105 | 204 | 0 |
+| 100 | A equivalent commit | 0.28 | 0.46 | 105 | 0 | 0 |
+| 100 | B one document changed | 0.20 | 2.89 | 105 | 2 | 2 |
+| 100 | C settings replaced | 0.15 | 3.73 | 105 | 101 | 101 |
+| 100 | D language replaced | 0.15 | 2.01 | 105 | 101 | 101 |
+| 100 | E workspace replaced | 0.18 | 5.50 | 105 | 202 | 202 |
+| 1000 | build | 1.18 | 20.04 | 1005 | 2004 | 0 |
+| 1000 | A equivalent commit | 1.05 | 1.49 | 1005 | 0 | 0 |
+| 1000 | B one document changed | 0.81 | 4.38 | 1005 | 2 | 2 |
+| 1000 | C settings replaced | 0.84 | 19.19 | 1005 | 1001 | 1001 |
+| 1000 | D language replaced | 0.79 | 20.04 | 1005 | 1001 | 1001 |
+| 1000 | E workspace replaced | 0.89 | 22.03 | 1005 | 2002 | 2002 |
+| 10000 | build | 10.78 | 177.32 | 10005 | 20004 | 0 |
+| 10000 | A equivalent commit | 11.28 | 18.38 | 10005 | 0 | 0 |
+| 10000 | B one document changed | 13.50 | 19.58 | 10005 | 2 | 2 |
+| 10000 | C settings replaced | 22.75 | 181.68 | 10005 | 10001 | 10001 |
+| 10000 | D language replaced | 11.89 | 206.22 | 10005 | 10001 | 10001 |
+| 10000 | E workspace replaced | 7.56 | 212.85 | 10005 | 20002 | 20002 |
 
 The topology is the editor from the specification, so each document carries a
 `Diagnostics` child that depends on both `Settings` and `Language`: a build of
@@ -83,3 +87,38 @@ shows one of:
 
 Neither is visible at these sizes. The measurement, not the shape of the code,
 should decide.
+
+## Identity: encoded strings versus Effect `Equal` / `Hash`
+
+`docs/spec.3.md` Phase C required benchmarking Effect-native key identity
+against the encoded-string scheme it replaced, and not switching the public API
+until parity was shown. Both were measured on this machine, at 10,000 documents
+— the size where the difference is visible at all.
+
+| scenario | encoded strings | Effect identity |
+| :--- | ---: | ---: |
+| build, converge ms | 174.2 | 177.3 |
+| A equivalent commit, converge ms | 12.6 | 18.4 |
+| B one document changed, converge ms | 21.7 | 19.6 |
+| C settings replaced, converge ms | 163.4 | 181.7 |
+| D language replaced, converge ms | 164.6 | 206.2 |
+| E workspace replaced, converge ms | 201.5 | 212.9 |
+
+Every churn and selector-evaluation count is **identical** between the two: the
+switch changed how identity is computed, not what is identical to what.
+
+The first implementation was about 2× slower on the convergence path, which is
+not parity. Three changes closed the gap, none of them incremental dependency
+tracking (spec.3 §47 — full-snapshot semantics are preserved):
+
+1. semantic identities cache their hash and compare hashes before walking the
+   key or the owner chain;
+2. each desired node's replacement-slot identity is computed once with the
+   snapshot rather than per reconcile pass;
+3. desire is matched to live instances once per published snapshot, so the
+   admission phase skips already-satisfied nodes without hashing anything.
+
+What remains is a 10–25% convergence cost at 10,000 lifetimes, against a
+commit path that is unchanged and a public API with no key descriptors in it.
+That was judged worth it. If a real workload ever disagrees, the numbers to
+beat are in this table.

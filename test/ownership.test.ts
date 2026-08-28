@@ -1,6 +1,5 @@
 import { Context, Deferred, Effect, Option } from "effect"
 import { describe, expect, it } from "@effect/vitest"
-import * as Key from "../src/Key.js"
 import * as Reconciler from "../src/Reconciler.js"
 import * as Replacement from "../src/Replacement.js"
 import { bindEditor, makeEditor, model, SessionService } from "./fixtures.js"
@@ -64,7 +63,6 @@ describe("ownership", () => {
       const gate = yield* Deferred.make<void>()
       const Def = Reconciler.define((define) => {
         const Session = define.one("Session", {
-          key: Key.string,
           start: (userId: string) =>
             Effect.gen(function* () {
               log.push(`session:starting:${userId}`)
@@ -73,7 +71,6 @@ describe("ownership", () => {
             })
         })
         const Workspace = define.one("Workspace", {
-          key: Key.string,
           owner: Session,
           start: (id: string) => Effect.sync(() => log.push(`workspace:start:${id}`))
         })
@@ -107,16 +104,13 @@ describe("ownership", () => {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => {
         const Organization = define.many("Organization", {
-          key: Key.string,
           start: (id: string) => Effect.sync(() => log.push(`org:${id}`))
         })
         const Workspace = define.one("Workspace", {
-          key: Key.string,
           owner: Organization,
           start: (id: string) => Effect.sync(() => log.push(`workspace:${id}`))
         })
         const Document = define.many("Document", {
-          key: Key.string,
           owner: Workspace,
           start: (uri: string) => Effect.sync(() => log.push(`document:${uri}`))
         })
@@ -162,13 +156,11 @@ describe("ownership", () => {
 
       const Def = Reconciler.define((define) => {
         const Session = define.one("Session", {
-          key: Key.string,
           replacement: Replacement.overlap(),
           start: (userId: string) =>
             Effect.succeed(Context.make(SessionService, { userId }))
         })
         const Workspace = define.one("Workspace", {
-          key: Key.string,
           owner: Session,
           start: (id: string) =>
             Effect.gen(function* () {
@@ -185,7 +177,6 @@ describe("ownership", () => {
         // Admitted only beneath a Running workspace: observes exactly which
         // workspace generations ever became Running.
         const Marker = define.one("Marker", {
-          key: Key.null,
           owner: Workspace,
           start: () =>
             Effect.gen(function* () {

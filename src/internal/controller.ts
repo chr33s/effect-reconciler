@@ -1,15 +1,19 @@
 import type * as Cause from "effect/Cause"
 import * as CauseModule from "effect/Cause"
 import * as Context from "effect/Context"
+import * as Equal from "effect/Equal"
 import * as Deferred from "effect/Deferred"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
 import * as Fiber from "effect/Fiber"
+import * as Option from "effect/Option"
 import { pipe } from "effect/Function"
+import * as MutableHashMap from "effect/MutableHashMap"
 import * as PubSub from "effect/PubSub"
 import * as Queue from "effect/Queue"
 import * as Result from "effect/Result"
 import * as Scope from "effect/Scope"
+import * as Stream from "effect/Stream"
 import * as Semaphore from "effect/Semaphore"
 import type { BindingEntry } from "../Binding.js"
 import { ControllerClosed, type CommitError } from "../Errors.js"
@@ -24,6 +28,7 @@ import {
   type DesiredNode,
   type DesiredSnapshot
 } from "./desiredSnapshot.js"
+import { Ident } from "./identity.js"
 
 type Status = "starting" | "running" | "stopping" | "failed"
 
@@ -32,8 +37,10 @@ type Status = "starting" | "running" | "stopping" | "failed"
 interface LiveInstance {
   readonly familyId: number
   readonly key: unknown
-  readonly path: string
-  readonly slotId: string
+  /** Structural semantic identity: family, key and owner chain. */
+  readonly ident: Ident
+  /** Identity of the replacement slot this generation occupies. */
+  readonly slot: Ident
   readonly owner: LiveInstance | null
   /** Exact physical provider instances captured at admission. Never rebound. */
   readonly providers: ReadonlyMap<string, LiveInstance>
@@ -41,6 +48,10 @@ interface LiveInstance {
   readonly children: Set<LiveInstance>
   status: Status
   obsolete: boolean
+  /** Cache of "is this still desired?" for one published snapshot: many
+   * reconcile passes run against the same desire. */
+  desiredRevision: number
+  desiredNode: DesiredNode | undefined
   providedContext: Context.Context<never>
   /** Why startup failed, for `status`. Set only in the `failed` state. */
   failure: Cause.Cause<unknown> | null
@@ -83,8 +94,8 @@ export interface TestHooks {
 
 export interface ControllerInternal<State> {
   readonly commit: (state: State) => Effect.Effect<void, CommitError>
-  readonly failures: Effect.Effect<PubSub.Subscription<LifetimeFailure>, never, Scope.Scope>
-  readonly status: (ref: LifetimeRef) => Effect.Effect<LifetimeStatus>
+  readonly failures: Stream.Stream<LifetimeFailure>
+  readonly status: (ref: LifetimeRef) => Effect.Effect<Option.Option<LifetimeStatus>>
   readonly retry: (ref: LifetimeRef) => Effect.Effect<void, ControllerClosed>
   readonly shutdown: Effect.Effect<void>
   readonly [TestHooksId]: TestHooks
@@ -116,13 +127,14 @@ export const makeController = <State>(
 
     let open = true
     let desired: DesiredSnapshot = emptySnapshot
+    let desiredRevision = 0
     // Bookkeeping for the convergence barrier: `wakeVersion` counts requested
     // reconcile work, `reconciledVersion` the newest request a completed pass
     // has covered. Equal versions mean no pass is owed.
     let wakeVersion = 0
     let reconciledVersion = 0
-    const slots = new Map<string, Slot>()
-    const currentByPath = new Map<string, LiveInstance>()
+    const slots = MutableHashMap.empty<Ident, Slot>()
+    const currentByIdent = MutableHashMap.empty<Ident, LiveInstance>()
     const all = new Set<LiveInstance>()
 
     const wakeUp = Effect.suspend(() => {
@@ -130,17 +142,11 @@ export const makeController = <State>(
       return Effect.asVoid(Queue.offer(wake, void 0))
     })
 
-    const slotIdFor = (family: CompiledFamily, ownerPath: string, keyStr: string): string =>
-      family.cardinality === "one"
-        ? `${ownerPath}|${family.id}`
-        : `${ownerPath}|${family.id}:${keyStr}`
-
-    const getSlot = (id: string): Slot => {
-      let slot = slots.get(id)
-      if (slot === undefined) {
-        slot = { current: undefined, retiring: new Set() }
-        slots.set(id, slot)
-      }
+    const getSlot = (id: Ident): Slot => {
+      const existing = MutableHashMap.get(slots, id)
+      if (Option.isSome(existing)) return existing.value
+      const slot: Slot = { current: undefined, retiring: new Set() }
+      MutableHashMap.set(slots, id, slot)
       return slot
     }
 
@@ -187,15 +193,18 @@ export const makeController = <State>(
             collectOwnedSubtree(root, subtree)
             for (const inst of subtree) {
               all.delete(inst)
-              const slot = slots.get(inst.slotId)
-              if (slot !== undefined) {
-                slot.retiring.delete(inst)
-                if (slot.current === inst) slot.current = undefined
-                if (slot.current === undefined && slot.retiring.size === 0) {
-                  slots.delete(inst.slotId)
+              const slot = MutableHashMap.get(slots, inst.slot)
+              if (Option.isSome(slot)) {
+                slot.value.retiring.delete(inst)
+                if (slot.value.current === inst) slot.value.current = undefined
+                if (slot.value.current === undefined && slot.value.retiring.size === 0) {
+                  MutableHashMap.remove(slots, inst.slot)
                 }
               }
-              if (currentByPath.get(inst.path) === inst) currentByPath.delete(inst.path)
+              const current = MutableHashMap.get(currentByIdent, inst.ident)
+              if (Option.isSome(current) && current.value === inst) {
+                MutableHashMap.remove(currentByIdent, inst.ident)
+              }
               inst.owner?.children.delete(inst)
             }
           })
@@ -242,7 +251,7 @@ export const makeController = <State>(
           // application-visible failure. Desire can have been withdrawn
           // between admission and this completion, before the reconcile pass
           // that will obsolete this generation has even run.
-          const stillDesired = desired.byPath.has(inst.path)
+          const stillDesired = MutableHashMap.has(desired.byIdent, inst.ident)
           return pipe(
             stillDesired
               ? PubSub.publish(failureLog, { lifetime: semanticRef(inst), cause: exit.cause })
@@ -271,15 +280,15 @@ export const makeController = <State>(
      * programming error, so it is reported as a defect rather than silently
      * matching nothing.
      */
-    const pathOf = (ref: LifetimeRef): string => {
+    const identOf = (ref: LifetimeRef): Ident => {
       if (!isHandle(ref.family) || asInternal(ref.family).identity !== compiled.identity) {
         throw new Error(
           "effect-reconciler: LifetimeRef names a family from a different Definition"
         )
       }
       const family = compiled.families[asInternal(ref.family).familyId]!
-      const parent = ref.parent === null ? "" : pathOf(ref.parent as LifetimeRef)
-      return parent + "/" + family.id + ":" + encodeURIComponent(family.key.encode(ref.key))
+      const parent = ref.parent === null ? null : identOf(ref.parent as LifetimeRef)
+      return new Ident(family.id, ref.key, parent)
     }
 
     const resolveProvider = (
@@ -288,14 +297,18 @@ export const makeController = <State>(
     ): LiveInstance | undefined => {
       if (requirement.kind === "ancestor") {
         const ancestor = node.chain[requirement.depth - 1]
-        return ancestor === undefined ? undefined : currentByPath.get(ancestor.path)
+        return ancestor === undefined
+          ? undefined
+          : Option.getOrUndefined(MutableHashMap.get(currentByIdent, ancestor.ident))
       }
       const ownerNode = requirement.depth === 0 ? null : node.chain[requirement.depth - 1]
       const candidates = ownerNode == null
         ? desired.rootsByFamily.get(requirement.familyId)
         : ownerNode.childrenByFamily.get(requirement.familyId)
       const providerNode = candidates?.[0]
-      return providerNode === undefined ? undefined : currentByPath.get(providerNode.path)
+      return providerNode === undefined
+        ? undefined
+        : Option.getOrUndefined(MutableHashMap.get(currentByIdent, providerNode.ident))
     }
 
     const admit = (
@@ -304,7 +317,7 @@ export const makeController = <State>(
       ownerLive: LiveInstance | null,
       providers: ReadonlyMap<string, LiveInstance>,
       slot: Slot,
-      slotId: string
+      slotIdent: Ident
     ): Effect.Effect<void> =>
       Effect.gen(function* () {
         const parentScope = ownerLive === null ? rootScope : ownerLive.scope
@@ -312,20 +325,25 @@ export const makeController = <State>(
         const inst: LiveInstance = {
           familyId: family.id,
           key: node.key,
-          path: node.path,
-          slotId,
+          ident: node.ident,
+          slot: slotIdent,
           owner: ownerLive,
           providers,
           scope: instScope,
           children: new Set(),
           status: "starting",
           obsolete: false,
+          desiredRevision: -1,
+          desiredNode: undefined,
           providedContext: Context.empty(),
           failure: null,
           closing: null
         }
         slot.current = inst
-        currentByPath.set(node.path, inst)
+        MutableHashMap.set(currentByIdent, node.ident, inst)
+        node.live = inst
+        inst.desiredRevision = desiredRevision
+        inst.desiredNode = node
         all.add(inst)
         ownerLive?.children.add(inst)
 
@@ -372,7 +390,15 @@ export const makeController = <State>(
         changed = false
         for (const inst of all) {
           if (inst.obsolete) continue
-          let invalid = !desired.byPath.has(inst.path)
+          if (inst.desiredRevision !== desiredRevision) {
+            inst.desiredRevision = desiredRevision
+            const node = Option.getOrUndefined(MutableHashMap.get(desired.byIdent, inst.ident))
+            inst.desiredNode = node
+            // Matching desire to live instances once per snapshot lets the
+            // admission phase skip satisfied nodes without a lookup.
+            if (node !== undefined) node.live = inst
+          }
+          let invalid = inst.desiredNode === undefined
           if (!invalid && inst.owner !== null && inst.owner.obsolete) invalid = true
           if (!invalid) {
             for (const provider of inst.providers.values()) {
@@ -392,10 +418,13 @@ export const makeController = <State>(
       if (newlyObsolete.length > 0) {
         const newlySet = new Set(newlyObsolete)
         for (const inst of newlyObsolete) {
-          const slot = getSlot(inst.slotId)
+          const slot = getSlot(inst.slot)
           if (slot.current === inst) slot.current = undefined
           slot.retiring.add(inst)
-          if (currentByPath.get(inst.path) === inst) currentByPath.delete(inst.path)
+          const current = MutableHashMap.get(currentByIdent, inst.ident)
+          if (Option.isSome(current) && current.value === inst) {
+            MutableHashMap.remove(currentByIdent, inst.ident)
+          }
           inst.status = "stopping"
         }
         // Subtree roots get their own close (descendants close with them).
@@ -415,16 +444,22 @@ export const makeController = <State>(
       // and Running, all required providers are current and Running, and the
       // replacement policy permits it.
       for (const node of desired.topo) {
+        // Already satisfied by a current generation: nothing to admit, and no
+        // need to hash anything to find that out.
+        const satisfying = node.live as LiveInstance | undefined
+        if (satisfying !== undefined && !satisfying.obsolete) continue
+
         const family = compiled.families[node.familyId]!
         let ownerLive: LiveInstance | null = null
         if (node.parent !== null) {
-          const owner = currentByPath.get(node.parent.path)
+          const known = node.parent.live as LiveInstance | undefined
+          const owner = known !== undefined && !known.obsolete
+            ? known
+            : Option.getOrUndefined(MutableHashMap.get(currentByIdent, node.parent.ident))
           if (owner === undefined || owner.obsolete || owner.status !== "running") continue
           ownerLive = owner
         }
-        const ownerPath = node.parent === null ? "" : node.parent.path
-        const slotId = slotIdFor(family, ownerPath, node.keyStr)
-        const slot = getSlot(slotId)
+        const slot = getSlot(node.slot)
         if (slot.current !== undefined) continue
 
         const providers = new Map<string, LiveInstance>()
@@ -440,7 +475,7 @@ export const makeController = <State>(
         if (!ready) continue
         if (family.replacement === "sequential" && slot.retiring.size > 0) continue
 
-        yield* admit(node, family, ownerLive, providers, slot, slotId)
+        yield* admit(node, family, ownerLive, providers, slot, node.slot)
       }
     })
 
@@ -486,6 +521,7 @@ export const makeController = <State>(
               if (!open) return Effect.fail(new ControllerClosed())
               if (Result.isFailure(snapshot)) return Effect.fail(snapshot.failure)
               desired = snapshot.success
+              desiredRevision++
               return wakeUp
             })
           )
@@ -497,28 +533,32 @@ export const makeController = <State>(
      * mutex the reconciler mutates under, so it never observes a half-applied
      * pass.
      */
-    const status = (ref: LifetimeRef): Effect.Effect<LifetimeStatus> =>
+    const status = (ref: LifetimeRef): Effect.Effect<Option.Option<LifetimeStatus>> =>
       mutex.withPermits(1)(
-        Effect.sync((): LifetimeStatus => {
-          const path = pathOf(ref)
-          const inst = currentByPath.get(path)
+        Effect.sync((): Option.Option<LifetimeStatus> => {
+          const ident = identOf(ref)
+          const inst = Option.getOrUndefined(MutableHashMap.get(currentByIdent, ident))
           if (inst !== undefined) {
             switch (inst.status) {
               case "starting":
-                return { _tag: "Starting" }
+                return Option.some({ _tag: "Starting" })
               case "running":
-                return { _tag: "Running" }
+                return Option.some({ _tag: "Running" })
               case "failed":
-                return { _tag: "Failed", cause: inst.failure ?? CauseModule.empty }
+                return Option.some({
+                  _tag: "Failed",
+                  cause: inst.failure ?? CauseModule.empty
+                })
               case "stopping":
-                return { _tag: "Stopping" }
+                return Option.some({ _tag: "Stopping" })
             }
           }
-          if (desired.byPath.has(path)) return { _tag: "Pending" }
+          // A generation that is no longer current but still finalizing is
+          // still something that exists.
           for (const other of all) {
-            if (other.path === path) return { _tag: "Stopping" }
+            if (Equal.equals(other.ident, ident)) return Option.some({ _tag: "Stopping" })
           }
-          return { _tag: "NotDesired" }
+          return Option.none()
         })
       )
 
@@ -537,19 +577,19 @@ export const makeController = <State>(
         mutex.withPermits(1)(
           Effect.suspend((): Effect.Effect<void, ControllerClosed> => {
             if (!open) return Effect.fail(new ControllerClosed())
-            const path = pathOf(ref)
-            const inst = currentByPath.get(path)
+            const ident = identOf(ref)
+            const inst = Option.getOrUndefined(MutableHashMap.get(currentByIdent, ident))
             if (inst === undefined || inst.status !== "failed") return Effect.void
-            if (!desired.byPath.has(path)) return Effect.void
+            if (!MutableHashMap.has(desired.byIdent, ident)) return Effect.void
 
             // Retire it exactly as obsolescence does, so the replacement
             // policy still governs when the fresh generation may start.
             inst.obsolete = true
             inst.status = "stopping"
-            const slot = getSlot(inst.slotId)
+            const slot = getSlot(inst.slot)
             if (slot.current === inst) slot.current = undefined
             slot.retiring.add(inst)
-            currentByPath.delete(path)
+            MutableHashMap.remove(currentByIdent, ident)
             return Effect.andThen(beginStop(inst), wakeUp)
           })
         )
@@ -566,6 +606,7 @@ export const makeController = <State>(
             Effect.sync(() => {
               open = false
               desired = emptySnapshot
+              desiredRevision++
             })
           ),
           Effect.andThen(Scope.close(rootScope, Exit.void)),
@@ -585,7 +626,7 @@ export const makeController = <State>(
         // close that has not reached its finalization boundary is unsettled.
         if (inst.closing !== null && !Deferred.isDoneUnsafe(inst.closing)) return false
       }
-      for (const slot of slots.values()) {
+      for (const slot of MutableHashMap.values(slots)) {
         if (slot.retiring.size > 0) return false
       }
       return true
@@ -600,7 +641,7 @@ export const makeController = <State>(
 
     return {
       commit,
-      failures: PubSub.subscribe(failureLog),
+      failures: Stream.fromPubSub(failureLog),
       status,
       retry,
       shutdown,

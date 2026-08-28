@@ -1,10 +1,13 @@
 # effect-reconciler
 
-## Runtime Specification v0.8
+## Runtime Specification v0.9
 
-> v0.8 adds §92–§96: semantic lifetime references, same-key retry, failed-slot
-> semantics, the failure observation contract and Definition identity. Each was
-> implemented and tested before being written down, per `docs/spec.2.md` §13.
+> v0.8 added §92–§96: semantic lifetime references, same-key retry, failed-slot
+> semantics, the failure observation contract and Definition identity.
+> v0.9 adds §97–§99: Effect-native key identity, the tagged error algebra and
+> the observation surface. Each was implemented, tested and — for key identity
+> — benchmarked before being written down, per `docs/spec.2.md` §13 and
+> `docs/spec.3.md` §52.
 
 ## 1. Thesis
 
@@ -2905,14 +2908,11 @@ is fully released before another attempt acquires it.
 
 Two mechanisms, deliberately different in strength.
 
-`Controller.status(ref)` is authoritative and cannot be missed:
+`Controller.status(ref)` is authoritative and cannot be missed. Its shape is
+given in §99: `Some` of a physical state, or `None` when no generation exists.
 
-```text
-NotDesired | Pending | Starting | Running | Failed(cause) | Stopping
-```
-
-`Controller.failures` is a live convenience: a Scope-owned subscription to
-failures of lifetimes whose desire is still current.
+`Controller.failures` is a live convenience: a `Stream` of the failures of
+lifetimes whose desire is still current.
 
 Its delivery contract is explicit:
 
@@ -2937,6 +2937,100 @@ identity is its handle object. Neither is a name nor a numeric index, so
 handles cannot be confused across Definitions that declare families in the same
 order, nor across two duplicate installed copies of the package. Numeric family
 ids remain, but only as indexes within one Definition.
+
+---
+
+## 97. Key identity is Effect's
+
+A family declares no key descriptor. The semantic key type is inferred from
+`start`, and semantic equality is `Equal.equals` with `Hash.hash`, the same
+convention `RcMap` and the Effect collections use.
+
+```ts
+define.one("Session", {
+  start: (userId: string) => ...
+})
+```
+
+Primitives work as themselves. Structural keys are ordinary values — a plain
+object, an array, an Effect `Data` value — because Effect compares and hashes
+all of them structurally. Nothing has to be serialized, and therefore nothing
+has to be escaped: the delimiter-collision class of bug the earlier encoded
+path scheme had to defend against cannot be expressed.
+
+The one value Effect compares by reference is a function, so a function key is
+rejected as invalid desired state rather than churning the lifetime on every
+commit.
+
+The §8.3 rule is unchanged and now purely semantic:
+
+> Put a value in the semantic key only when changing it should create a
+> different semantic lifetime.
+
+Identity performance is measured, not assumed: `bench/RESULTS.md` records this
+scheme against the encoded-string scheme it replaced, with identical churn.
+
+---
+
+## 98. Errors are tagged data
+
+Expected failures are Effect-style tagged errors carrying the family they
+concern, so recovery is ordinary `catchTag` / `catchTags`:
+
+```text
+DefinitionError = ForeignOwner | OwnershipCycle | ForeignRequirement
+                | CapabilityCycle | AmbiguousProvider | UnresolvableProvider
+
+BindingError    = ForeignHandle | MissingBinding | DuplicateBinding
+                | CardinalityMismatch
+
+CommitError     = ControllerClosed | InvalidDesiredState
+```
+
+`InvalidDesiredState` carries a discriminated reason:
+
+```text
+DuplicateDesiredKey | InvalidSelectorResult | SelectorFailed | UnstableKey
+```
+
+Message formatting is presentation, not structure. Impossible states caused by
+a bug in this package are defects, not members of these unions.
+
+---
+
+## 99. The observation surface
+
+```ts
+interface Controller<State> {
+  readonly commit: (state: State) => Effect<void, CommitError>
+  readonly retry: (ref: LifetimeRef) => Effect<void, ControllerClosed>
+  readonly status: (ref: LifetimeRef) => Effect<Option<LifetimeStatus>>
+  readonly failures: Stream<LifetimeFailure>
+  readonly shutdown: Effect<void>
+}
+```
+
+`status` is authoritative and answers with what exists:
+
+```text
+Some(Starting | Running | Failed(cause) | Stopping)
+None  — no physical generation for that semantic identity
+```
+
+`None` covers both "not desired" and "desired but not admitted". What was
+asked for lives in the application's own state; the runtime reports what
+exists.
+
+`failures` is a live `Stream`, not a raw PubSub: a convenience for reacting,
+never for remembering. A subscriber that falls behind loses events rather than
+holding reconciliation up, which is exactly why `status` is the authority.
+
+Controller stays this small deliberately: no `start`, `stop`, `restart`,
+`pause`, `rebind` or `invalidate`.
+
+---
+
+---
 
 ---
 

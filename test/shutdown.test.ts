@@ -1,6 +1,5 @@
 import { Deferred, Effect, Option } from "effect"
 import { describe, expect, it } from "@effect/vitest"
-import * as Key from "../src/Key.js"
 import * as Reconciler from "../src/Reconciler.js"
 import { eventually, quietFor } from "./util.js"
 
@@ -11,7 +10,6 @@ describe("shutdown", () => {
       const gate = yield* Deferred.make<void>()
       const Def = Reconciler.define((define) => {
         const Slow = define.one("Slow", {
-          key: Key.string,
           start: (k: string) =>
             Effect.gen(function* () {
               log.push(`begin:${k}`)
@@ -21,7 +19,6 @@ describe("shutdown", () => {
             })
         })
         const Child = define.one("Child", {
-          key: Key.null,
           owner: Slow,
           start: () => Effect.sync(() => log.push("child:start"))
         })
@@ -54,7 +51,7 @@ describe("shutdown", () => {
   it.live("9.14 — shutdown is idempotent", () =>
     Effect.gen(function* () {
       const Def = Reconciler.define((define) => ({
-        Res: define.one("Res", { key: Key.string, start: () => Effect.void })
+        Res: define.one("Res", { start: (_key: string) => Effect.void })
       }))
       const controller = yield* Reconciler.make(
         Def.bind<{}>((bind) => ({
@@ -68,7 +65,7 @@ describe("shutdown", () => {
   it.live("9.15 — commit after shutdown fails with ControllerClosed", () =>
     Effect.gen(function* () {
       const Def = Reconciler.define((define) => ({
-        Res: define.one("Res", { key: Key.string, start: () => Effect.void })
+        Res: define.one("Res", { start: (_key: string) => Effect.void })
       }))
       const controller = yield* Reconciler.make(
         Def.bind<{ readonly key: string }>((bind) => ({
@@ -92,7 +89,6 @@ describe("shutdown", () => {
         Effect.gen(function* () {
           const Def = Reconciler.define((define) => ({
             Res: define.one("Res", {
-              key: Key.string,
               start: (k: string) =>
                 Effect.gen(function* () {
                   log.push(`start:${k}`)

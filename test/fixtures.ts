@@ -1,5 +1,4 @@
 import { Context, Effect, Option } from "effect"
-import * as Key from "../src/Key.js"
 import * as Reconciler from "../src/Reconciler.js"
 
 export class SettingsService extends Context.Service<
@@ -66,7 +65,6 @@ export const makeEditor = (log: Array<string>) => {
 
   return Reconciler.define((define) => {
     const Settings = define.one("Settings", {
-      key: Key.number,
       start: (revision: number) =>
         Effect.gen(function* () {
           yield* record(`settings:${revision}`)
@@ -75,7 +73,6 @@ export const makeEditor = (log: Array<string>) => {
     })
 
     const Session = define.one("Session", {
-      key: Key.string,
       start: (userId: string) =>
         Effect.gen(function* () {
           yield* record(`session:${userId}`)
@@ -84,7 +81,6 @@ export const makeEditor = (log: Array<string>) => {
     })
 
     const Workspace = define.one("Workspace", {
-      key: Key.string,
       owner: Session,
       start: (workspaceId: string) =>
         Effect.gen(function* () {
@@ -95,7 +91,6 @@ export const makeEditor = (log: Array<string>) => {
     })
 
     const Language = define.one("Language", {
-      key: Key.string,
       owner: Workspace,
       start: (language: string) =>
         Effect.gen(function* () {
@@ -105,7 +100,6 @@ export const makeEditor = (log: Array<string>) => {
     })
 
     const Document = define.many("Document", {
-      key: Key.string,
       owner: Workspace,
       start: (uri: string) =>
         Effect.gen(function* () {
@@ -115,7 +109,6 @@ export const makeEditor = (log: Array<string>) => {
     })
 
     const Diagnostics = define.one("Diagnostics", {
-      key: Key.null,
       owner: Document,
       requires: { settings: Settings, language: Language },
       start: () =>

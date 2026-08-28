@@ -1,6 +1,5 @@
-import { Effect, Option } from "effect"
+import { Data, Effect, Equal, Option } from "effect"
 import { describe, expect, it } from "@effect/vitest"
-import * as Key from "../src/Key.js"
 import * as Reconciler from "../src/Reconciler.js"
 import { count, eventually, idle } from "./util.js"
 
@@ -11,7 +10,6 @@ interface UserState {
 const makeSession = (log: Array<string>) =>
   Reconciler.define((define) => ({
     Session: define.one("Session", {
-      key: Key.string,
       start: (userId: string) =>
         Effect.gen(function* () {
           log.push(`start:${userId}`)
@@ -83,7 +81,6 @@ describe("identity", () => {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => ({
         Document: define.many("Document", {
-          key: Key.string,
           start: (uri: string) =>
             Effect.gen(function* () {
               log.push(`start:${uri}`)
@@ -140,45 +137,72 @@ describe("identity", () => {
       )
     }))
 
-  it.live("Key.struct — key equality is structural, not referential", () =>
+  it.live("structural keys are compared structurally, not referentially", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
+      // An ordinary Effect data value. A plain object literal works too:
+      // Effect compares and hashes both structurally.
+      class DocumentKey extends Data.Class<{
+        readonly uri: string
+        readonly version: number
+      }> {}
+
       const Def = Reconciler.define((define) => ({
         Doc: define.one("Doc", {
-          key: Key.struct({ uri: Key.string, version: Key.number }),
-          start: (k: { readonly uri: string; readonly version: number }) =>
-            Effect.sync(() => log.push(`start:${k.uri}@${k.version}`))
+          start: (k: DocumentKey) => Effect.sync(() => log.push(`start:${k.uri}@${k.version}`))
         })
       }))
       const controller = yield* Reconciler.make(
         Def.bind<{ readonly uri: string; readonly version: number }>((bind) => ({
-          doc: bind.one(Def.Doc, (s) => Option.some({ uri: s.uri, version: s.version }))
+          doc: bind.one(Def.Doc, (s) =>
+            Option.some(new DocumentKey({ uri: s.uri, version: s.version }))
+          )
         }))
       )
 
       yield* controller.commit({ uri: "a", version: 1 })
       yield* eventually(() => log.includes("start:a@1"), "started")
-      // New object, equal structure: retained.
+      // A different instance with equal contents: the same lifetime.
       yield* controller.commit({ uri: "a", version: 1 })
       yield* idle(controller)
       expect(log).toEqual(["start:a@1"])
-      // Changed field: replaced.
+      // Changed field: a different lifetime.
       yield* controller.commit({ uri: "a", version: 2 })
       yield* eventually(() => log.includes("start:a@2"), "replaced")
     }))
 
-  it.live("custom Key encodings containing path delimiters cannot collide identities", () =>
+  it.live("a plain object key works without any key descriptor", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
-      // Raw identity encoding: injective, but full of '/'-':'-'|' characters.
-      const rawKey: Key.Key<string> = { encode: (s) => s }
+      const Def = Reconciler.define((define) => ({
+        Doc: define.many("Doc", {
+          start: (k: { readonly uri: string; readonly line: number }) =>
+            Effect.sync(() => log.push(`start:${k.uri}:${k.line}`))
+        })
+      }))
+      const controller = yield* Reconciler.make(
+        Def.bind<{ readonly lines: ReadonlyArray<number> }>((bind) => ({
+          docs: bind.many(Def.Doc, (s) => s.lines.map((line) => ({ uri: "a.ts", line })))
+        }))
+      )
+
+      yield* controller.commit({ lines: [1, 2] })
+      yield* eventually(() => log.length === 2, "both started")
+      // Fresh objects with equal contents each commit: no churn at all.
+      yield* controller.commit({ lines: [1, 2] })
+      yield* controller.commit({ lines: [1, 2] })
+      yield* idle(controller)
+      expect(log).toEqual(["start:a.ts:1", "start:a.ts:2"])
+    }))
+
+  it.live("keys full of delimiter characters cannot collide across owners", () =>
+    Effect.gen(function* () {
+      const log: Array<string> = []
       const Def = Reconciler.define((define) => {
         const Parent = define.many("Parent", {
-          key: rawKey,
           start: (k: string) => Effect.sync(() => log.push(`parent:${k}`))
         })
         const Child = define.one("Child", {
-          key: rawKey,
           owner: Parent,
           start: (k: string) => Effect.sync(() => log.push(`child:${k}`))
         })
@@ -186,9 +210,10 @@ describe("identity", () => {
       })
       const controller = yield* Reconciler.make(
         Def.bind<{}>((bind) => ({
-          // Parent "a" with child "b" would collide with parent "a/1:b" if
-          // encodings were spliced into paths unescaped.
-          parents: bind.many(Def.Parent, () => ["a", "a/1:b"]),
+          // Identity is structural, so there is no encoding for these
+          // characters to collide inside — the parent key is the value, not a
+          // string spliced into a path.
+          parents: bind.many(Def.Parent, () => ["a", "a/1:b", "a|b"]),
           child: bind.one(Def.Child, (_s, owner) =>
             owner.key === "a" ? Option.some("b") : Option.none()
           )
@@ -200,46 +225,39 @@ describe("identity", () => {
         () =>
           log.includes("parent:a") &&
           log.includes("parent:a/1:b") &&
+          log.includes("parent:a|b") &&
           log.includes("child:b"),
-        "all three distinct lifetimes exist"
+        "all four distinct lifetimes exist"
       )
-      expect(log).toHaveLength(3)
+      expect(log).toHaveLength(4)
     }))
 
-  it.live("Key.struct framing survives adversarial component encodings", () =>
+  it.live("structurally distinct keys stay distinct however adversarial", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
-      // Raw identity encoding: injective on its own, but free to contain any
-      // delimiter the composition might use.
-      const rawKey: Key.Key<string> = { encode: (s) => s }
-      const key = Key.struct({ a: rawKey, b: rawKey })
-
+      class Pair extends Data.Class<{ readonly a: string; readonly b: string }> {}
       const Def = Reconciler.define((define) => ({
         Res: define.many("Res", {
-          key,
-          start: (k: { readonly a: string; readonly b: string }) =>
-            Effect.sync(() => log.push(`start:${k.a}|${k.b}`))
+          start: (k: Pair) => Effect.sync(() => log.push(`start:${k.a}|${k.b}`))
         })
       }))
       const controller = yield* Reconciler.make(
-        Def.bind<{ readonly keys: ReadonlyArray<{ readonly a: string; readonly b: string }> }>(
-          (bind) => ({ res: bind.many(Def.Res, (s) => s.keys) })
-        )
+        Def.bind<{ readonly keys: ReadonlyArray<Pair> }>((bind) => ({
+          res: bind.many(Def.Res, (s) => s.keys)
+        }))
       )
 
-      // Distinct structures that collide under naive `"a":<a>,"b":<b>`
-      // concatenation, plus quotes, braces, slashes, pipes and field-name-like
-      // text in the component encodings.
+      // Pairs that a naive `"a":<a>,"b":<b>` concatenation would collide, plus
+      // quotes, braces, slashes and pipes. Structural identity has no encoding
+      // for them to collide inside.
       const adversarial = [
-        { a: `1,"b":2`, b: `3` },
-        { a: `1`, b: `2,"b":3` },
-        { a: `{"a":x}`, b: `y` },
-        { a: `{"a":x}|y`, b: `` },
-        { a: `/1:2`, b: `|3` },
-        { a: `/1`, b: `:2|3` }
+        new Pair({ a: `1,"b":2`, b: `3` }),
+        new Pair({ a: `1`, b: `2,"b":3` }),
+        new Pair({ a: `{"a":x}`, b: `y` }),
+        new Pair({ a: `{"a":x}|y`, b: `` }),
+        new Pair({ a: `/1:2`, b: `|3` }),
+        new Pair({ a: `/1`, b: `:2|3` })
       ]
-      const encodings = new Set(adversarial.map((k) => key.encode(k)))
-      expect(encodings.size).toBe(adversarial.length)
 
       yield* controller.commit({ keys: adversarial })
       yield* eventually(
@@ -249,12 +267,11 @@ describe("identity", () => {
       expect(new Set(log).size).toBe(adversarial.length)
     }))
 
-  it.live("Key.number distinguishes 0 from -0 (encode defines semantic equality)", () =>
+  it.live("numeric keys follow Effect equality: 0 and -0 are one lifetime", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
-          key: Key.number,
           start: (k: number) =>
             Effect.sync(() => log.push(`start:${Object.is(k, -0) ? "-0" : String(k)}`))
         })
@@ -267,7 +284,16 @@ describe("identity", () => {
 
       yield* controller.commit({ key: 0 })
       yield* eventually(() => log.includes("start:0"), "0 started")
+
+      // `Equal.equals(0, -0)` is true, so this is the same semantic key and
+      // the lifetime is retained. Semantic identity is Effect's, not ours.
+      expect(Equal.equals(0, -0)).toBe(true)
       yield* controller.commit({ key: -0 })
-      yield* eventually(() => log.includes("start:-0"), "-0 replaced 0")
+      yield* idle(controller)
+      expect(log).toEqual(["start:0"])
+
+      // A genuinely different number replaces it.
+      yield* controller.commit({ key: 1 })
+      yield* eventually(() => log.includes("start:1"), "1 replaced 0")
     }))
 })

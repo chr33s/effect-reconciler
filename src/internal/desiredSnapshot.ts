@@ -1,17 +1,32 @@
-import * as Result from "effect/Result"
+import * as MutableHashMap from "effect/MutableHashMap"
 import * as Option from "effect/Option"
+import * as Result from "effect/Result"
 import type { BindingEntry } from "../Binding.js"
-import { InvalidDesiredState } from "../Errors.js"
+import {
+  DuplicateDesiredKey,
+  InvalidDesiredState,
+  InvalidSelectorResult,
+  SelectorFailed,
+  UnstableKey,
+  type InvalidDesiredStateReason
+} from "../Errors.js"
 import type { LifetimeRef } from "../LifetimeRef.js"
 import type { Compiled } from "./compiledDefinition.js"
+import { hasStableIdentity, Ident, oneSlot } from "./identity.js"
 
 /** One desired instance: family + semantic key, owner-relative. */
 export interface DesiredNode {
   readonly familyId: number
   readonly key: unknown
-  readonly keyStr: string
-  /** Semantic path: `/<familyId>:<key>` segments from the root. */
-  readonly path: string
+  /** Structural semantic identity: family, key and owner chain. */
+  readonly ident: Ident
+  /**
+   * Identity of the replacement slot this node competes for. A `one` family
+   * has a single key-independent slot per owner; a `many` family's slot is its
+   * own identity. Computed with the snapshot so a reconcile pass allocates
+   * nothing per node.
+   */
+  readonly slot: Ident
   readonly parent: DesiredNode | null
   /** Desired instance chain from root to this node (inclusive). */
   readonly chain: ReadonlyArray<DesiredNode>
@@ -22,19 +37,25 @@ export interface DesiredNode {
    * distinguish two identical direct owner keys under different ancestors.
    */
   readonly ref: LifetimeRef
+  /**
+   * The live generation currently satisfying this node, filled in by the
+   * reconciler. A pass that has already matched instances to desire can then
+   * skip satisfied nodes without hashing anything.
+   */
+  live: unknown
 }
 
 /** One coherent desired snapshot produced by evaluating a Binding against a
  * single immutable state value. */
 export interface DesiredSnapshot {
-  readonly byPath: ReadonlyMap<string, DesiredNode>
+  readonly byIdent: MutableHashMap.MutableHashMap<Ident, DesiredNode>
   /** Owner-before-child order. */
   readonly topo: ReadonlyArray<DesiredNode>
   readonly rootsByFamily: ReadonlyMap<number, ReadonlyArray<DesiredNode>>
 }
 
 export const emptySnapshot: DesiredSnapshot = {
-  byPath: new Map(),
+  byIdent: MutableHashMap.empty(),
   topo: [],
   rootsByFamily: new Map()
 }
@@ -50,12 +71,13 @@ export const evaluate = <State>(
   entries: ReadonlyMap<number, BindingEntry<State>>,
   state: State
 ): Result.Result<DesiredSnapshot, InvalidDesiredState> => {
-  const byPath = new Map<string, DesiredNode>()
+  const byIdent = MutableHashMap.empty<Ident, DesiredNode>()
   const topo: Array<DesiredNode> = []
   const rootsByFamily = new Map<number, Array<DesiredNode>>()
   const nodesByFamily = new Map<number, Array<DesiredNode>>()
 
-  const invalid = (reason: string) => Result.fail(new InvalidDesiredState({ reason }))
+  const invalid = (reason: InvalidDesiredStateReason) =>
+    Result.fail(new InvalidDesiredState({ reason }))
 
   for (const family of compiled.families) {
     const entry = entries.get(family.id)!
@@ -70,43 +92,43 @@ export const evaluate = <State>(
         const result = entry.selector(state, owner)
         if (family.cardinality === "one") {
           if (!Option.isOption(result)) {
-            return invalid(`selector for "${family.name}" must return an Option`)
+            return invalid(
+              new InvalidSelectorResult({ family: family.handle, expected: "Option" })
+            )
           }
           keys = Option.isSome(result) ? [result.value] : []
         } else {
-          if (
-            result == null ||
-            typeof (result as any)[Symbol.iterator] !== "function"
-          ) {
-            return invalid(`selector for "${family.name}" must return an Iterable`)
+          if (result == null || typeof (result as any)[Symbol.iterator] !== "function") {
+            return invalid(
+              new InvalidSelectorResult({ family: family.handle, expected: "Iterable" })
+            )
           }
           keys = [...(result as Iterable<unknown>)]
         }
       } catch (error) {
-        return invalid(`selector for "${family.name}" threw: ${String(error)}`)
+        return invalid(new SelectorFailed({ family: family.handle, error }))
       }
 
-      const seen = new Set<string>()
       for (const key of keys) {
-        let keyStr: string
-        try {
-          // Escaped so that arbitrary Key encodings can never collide with
-          // the '/', ':' and '|' delimiters of internal path/slot ids.
-          keyStr = encodeURIComponent(family.key.encode(key))
-        } catch (error) {
-          return invalid(`key encoding for "${family.name}" failed: ${String(error)}`)
+        // Semantic identity is Effect's: a key compared by reference would
+        // make every commit look like a different lifetime.
+        if (!hasStableIdentity(key)) {
+          return invalid(new UnstableKey({ family: family.handle, key }))
         }
-        if (seen.has(keyStr)) {
-          return invalid(`duplicate semantic key ${keyStr} for "${family.name}"`)
+        const ident = new Ident(family.id, key, parent === null ? null : parent.ident)
+        if (MutableHashMap.has(byIdent, ident)) {
+          return invalid(new DuplicateDesiredKey({ family: family.handle, key }))
         }
-        seen.add(keyStr)
-        const path = (parent === null ? "" : parent.path) + "/" + family.id + ":" + keyStr
+
         const childrenByFamily = new Map<number, Array<DesiredNode>>()
+        const parentIdent = parent === null ? null : parent.ident
         const node: DesiredNode = {
           familyId: family.id,
           key,
-          keyStr,
-          path,
+          ident,
+          slot: family.cardinality === "one"
+            ? new Ident(family.id, oneSlot, parentIdent)
+            : ident,
           parent,
           chain: [],
           childrenByFamily,
@@ -114,11 +136,12 @@ export const evaluate = <State>(
             family: family.handle,
             key,
             parent: parent === null ? null : parent.ref
-          }
+          },
+          live: undefined
         }
         ;(node as { chain: ReadonlyArray<DesiredNode> }).chain =
           parent === null ? [node] : [...parent.chain, node]
-        byPath.set(path, node)
+        MutableHashMap.set(byIdent, ident, node)
         topo.push(node)
         familyNodes.push(node)
         if (parent === null) {
@@ -131,5 +154,5 @@ export const evaluate = <State>(
     nodesByFamily.set(family.id, familyNodes)
   }
 
-  return Result.succeed({ byPath, topo, rootsByFamily })
+  return Result.succeed({ byIdent, topo, rootsByFamily })
 }

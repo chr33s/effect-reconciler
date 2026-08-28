@@ -51,8 +51,9 @@ line that exists only because lifetimes must be coordinated is marked
 **`after/app.ts` — the reconciler coordinates.** The Model carries domain state
 only, `update` is pure domain transitions with no Commands, and the ownership
 and capability story is stated once as a `Reconciler.define`. The integration
-is `controller.commit(model)` after every update, plus a drain of
-`controller.failures` into one Message.
+is `controller.commit(model)` after every update, plus a drain of the
+`controller.failures` Stream into one Message, and one `controller.retry(ref)`
+command behind the Retry button.
 
 Both are driven by `driver.ts`, a headless stand-in for the parts of the
 Foldkit runtime this comparison needs (Message loop, Commands, Managed
@@ -105,9 +106,9 @@ Manual provider invalidation sites           1       0    -100%
 Retry nonce fields in the Model              1       0    -100%
 Commands (lifecycle)                         2       0    -100%
 Domain branches running the supervisor      14       0    -100%
-Coordination SLOC                          143      67     -53%
-  reconciler integration SLOC                0      49      +49
-Application SLOC, whole feature            232     198     -15%
+Coordination SLOC                          143      62     -57%
+  reconciler integration SLOC                0      46      +46
+Application SLOC, whole feature            232     189     -19%
 Lifecycle race tests owned by the app        5       0    -100%
 ```
 
@@ -134,15 +135,15 @@ Reading the rows against the Phase 5 categories:
   version calls `controller.retry(ref)` against the key the Model already
   describes: no nonce, no withdrawn desire, no change to the Model at all.
 - **Race tests** move out of the application entirely.
-- **Coordination SLOC** halves: 135 hand-written lines become a 67-line
-  Definition and Binding, of which 26 are the integration wiring that any app
-  pays once regardless of how many families it declares.
+- **Coordination SLOC** more than halves: 143 hand-written lines become a
+  62-line Definition and Binding, plus 46 lines of integration wiring that any
+  app pays once regardless of how many families it declares.
 
 The 30–50% target in `docs/spec.1.md` §14 is met on lifecycle-specific code
-(−53%), while the whole feature shrinks by a more modest 15% — the domain half
-of the app is untouched, which is what should happen. Integration is now 49
-lines rather than 26, because the retry flow needs a semantic reference built
-from the Model; that is a cost paid once per application, not per family.
+(−57%), while the whole feature shrinks by a more modest 19% — the domain half
+of the app is untouched, which is what should happen. Integration is 46 lines,
+most of it the retry flow's semantic reference built from the Model; that is a
+cost paid once per application, not per family.
 
 ## What this does and does not establish
 

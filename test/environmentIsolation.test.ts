@@ -1,6 +1,5 @@
 import { Context, Deferred, Effect, Option } from "effect"
 import { describe, expect, it } from "@effect/vitest"
-import * as Key from "../src/Key.js"
 import * as Reconciler from "../src/Reconciler.js"
 import * as Replacement from "../src/Replacement.js"
 import { SessionService, SettingsService } from "./fixtures.js"
@@ -13,7 +12,6 @@ describe("environment isolation", () => {
       const stopGate = yield* Deferred.make<void>()
       const Def = Reconciler.define((define) => {
         const Session = define.one("Session", {
-          key: Key.string,
           replacement: Replacement.overlap(),
           start: (userId: string) =>
             Effect.gen(function* () {
@@ -23,7 +21,6 @@ describe("environment isolation", () => {
             })
         })
         const Workspace = define.one("Workspace", {
-          key: Key.string,
           owner: Session,
           replacement: Replacement.overlap(),
           start: (workspaceId: string) =>
@@ -68,7 +65,6 @@ describe("environment isolation", () => {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
-          key: Key.string,
           start: (k: string) =>
             Effect.gen(function* () {
               // Not a reconciled lifetime and not a `requires` provider: an
@@ -96,17 +92,14 @@ describe("environment isolation", () => {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => {
         const Settings = define.one("Settings", {
-          key: Key.number,
           start: (revision: number) =>
             Effect.succeed(Context.make(SettingsService, { revision }))
         })
         const Session = define.one("Session", {
-          key: Key.string,
           start: (userId: string) =>
             Effect.succeed(Context.make(SessionService, { userId }))
         })
         const Dep = define.one("Dep", {
-          key: Key.null,
           owner: Session,
           requires: { settings: Settings },
           start: () =>

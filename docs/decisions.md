@@ -150,7 +150,62 @@ authority.
 
 ---
 
-## 10. Optimization waits for measured pressure
+## 10. Semantic keys are ordinary Effect values
+
+No key descriptor exists. The key type is inferred from `start`, and identity
+is `Equal.equals` / `Hash.hash` — what `RcMap` and the Effect collections
+already use.
+
+**Why.** The earlier design made every family declare an injective string
+encoding, which put escaping and collision-safety on the user: two adversarial
+component encodings could collide and silently merge two lifetimes. With
+structural identity there is no encoding to collide inside, and a key is just a
+value. Effect compares plain objects, arrays, class instances and `Data` values
+structurally, so this costs the user nothing.
+
+**Rules out.** Serialization as the primary identity mechanism. A function key
+is rejected (`UnstableKey`) because it is the one value compared by reference.
+
+**Cost, measured.** Convergence is 10–25% slower than string paths at 10,000
+lifetimes, with identical churn; `bench/RESULTS.md` records both. Three
+snapshot-local memoizations closed an initial 2× gap without adding incremental
+dependency tracking.
+
+**Evidence.** `test/identity.test.ts`, `test/misuse.test-d.ts`,
+`bench/RESULTS.md`, `docs/spec.md` §97.
+
+---
+
+## 11. Expected failures are tagged data, defects stay defects
+
+`DefinitionError`, `BindingError` and `CommitError` are discriminated unions of
+`Data.TaggedError` cases carrying the family they concern.
+
+**Why.** A caller recovering from "this provider is ambiguous" should not be
+matching on a string. Tagged cases make `catchTags` exhaustive and give each
+case its own fields; formatting becomes presentation. Implementation bugs
+remain defects rather than joining a broad recoverable error.
+
+**Evidence.** `test/errors.test.ts` handles the whole algebra in one
+`catchTags`; `docs/spec.md` §98.
+
+---
+
+## 12. Status is authoritative; notifications are convenience
+
+`status(ref)` returns `Option<LifetimeStatus>`; `failures` is a `Stream`.
+
+**Why.** An application that turns a failure into UI state must be able to
+recover that state after a missed notification. Publication must never block
+reconciliation, which forces the stream to be lossy — so it cannot be the
+authority. `None` deliberately covers both "not desired" and "not yet
+admitted": what was asked for is in the application's own state.
+
+**Evidence.** `test/observation.test.ts`, `docs/spec.md` §99.
+
+---
+
+## 13. Optimization waits for measured pressure
 
 Binding evaluation and the reconcile sweep are O(N) per commit. No dirty-slot
 queues, dirty-family queues, incremental selector graphs or reverse

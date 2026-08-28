@@ -1,9 +1,8 @@
-import { Cause, Context, Effect, Option, PubSub } from "effect"
+import { Cause, Context, Effect, Option, Queue } from "effect"
 import { describe, expect, it } from "@effect/vitest"
-import * as Key from "../src/Key.js"
 import * as Reconciler from "../src/Reconciler.js"
 import { LanguageService, SessionService } from "./fixtures.js"
-import { eventually, idle, StartupFailed } from "./util.js"
+import { drainFailures, eventually, failureQueue, idle, StartupFailed } from "./util.js"
 
 describe("startup failure", () => {
   it.live("9.9 — a failed provider prevents dependent admission until a valid replacement runs", () =>
@@ -11,7 +10,6 @@ describe("startup failure", () => {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => {
         const Language = define.one("Language", {
-          key: Key.string,
           start: (language: string) =>
             Effect.gen(function* () {
               log.push(`language:begin:${language}`)
@@ -22,7 +20,6 @@ describe("startup failure", () => {
             })
         })
         const Diagnostics = define.one("Diagnostics", {
-          key: Key.null,
           requires: { language: Language },
           start: () =>
             Effect.gen(function* () {
@@ -54,11 +51,9 @@ describe("startup failure", () => {
     Effect.gen(function* () {
       const Def = Reconciler.define((define) => {
         const Session = define.one("Session", {
-          key: Key.string,
           start: (userId: string) => Effect.succeed(Context.make(SessionService, { userId }))
         })
         const Language = define.one("Language", {
-          key: Key.string,
           owner: Session,
           start: (language: string) =>
             language === "bad"
@@ -74,10 +69,10 @@ describe("startup failure", () => {
         }))
       )
 
-      const failures = yield* controller.failures
+      const failures = yield* failureQueue(controller)
       yield* controller.commit({ language: "bad" })
 
-      const failure = yield* PubSub.take(failures)
+      const failure = yield* Queue.take(failures)
       // Enough for a control plane to say "language server failed" for this
       // session, and nothing more.
       expect(failure.lifetime.family).toBe(Def.Language)
@@ -92,9 +87,7 @@ describe("startup failure", () => {
       // A healthy replacement produces no further failure event.
       yield* controller.commit({ language: "good" })
       yield* idle(controller)
-      expect(yield* PubSub.take(failures).pipe(Effect.timeoutOption(50))).toStrictEqual(
-        Option.none()
-      )
+      expect(yield* drainFailures(failures)).toEqual([])
     }))
 
   it.live("§38 — startup failure finalizes partial resources and admits no children", () =>
@@ -102,7 +95,6 @@ describe("startup failure", () => {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => {
         const Parent = define.one("Parent", {
-          key: Key.string,
           start: (k: string) =>
             Effect.gen(function* () {
               yield* Effect.acquireRelease(
@@ -113,7 +105,6 @@ describe("startup failure", () => {
             })
         })
         const Child = define.one("Child", {
-          key: Key.null,
           owner: Parent,
           start: () => Effect.sync(() => log.push("child:start"))
         })
@@ -141,7 +132,6 @@ describe("startup failure", () => {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
-          key: Key.string,
           start: (k: string) =>
             Effect.gen(function* () {
               yield* Effect.addFinalizer(() => Effect.sync(() => log.push(`cleanup:${k}`)))

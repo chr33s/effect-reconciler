@@ -1,4 +1,3 @@
-export * as Key from "./Key.js"
 export * as Reconciler from "./Reconciler.js"
 export * as Replacement from "./Replacement.js"
 
@@ -10,9 +9,24 @@ export type { BindApi, Binding, BindingEntry } from "./Binding.js"
 export type { ReplacementPolicy } from "./Replacement.js"
 export type { Controller, Defined } from "./Reconciler.js"
 export {
-  BindingError,
+  AmbiguousProvider,
+  CapabilityCycle,
+  CardinalityMismatch,
   ControllerClosed,
-  DefinitionError,
+  DuplicateBinding,
+  DuplicateDesiredKey,
+  ForeignHandle,
+  ForeignOwner,
+  ForeignRequirement,
   InvalidDesiredState,
-  type CommitError
+  InvalidSelectorResult,
+  MissingBinding,
+  OwnershipCycle,
+  SelectorFailed,
+  UnresolvableProvider,
+  UnstableKey,
+  type BindingError,
+  type CommitError,
+  type DefinitionError,
+  type InvalidDesiredStateReason
 } from "./Errors.js"

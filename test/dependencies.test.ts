@@ -1,6 +1,5 @@
 import { Context, Deferred, Effect, Option } from "effect"
 import { describe, expect, it } from "@effect/vitest"
-import * as Key from "../src/Key.js"
 import * as Reconciler from "../src/Reconciler.js"
 import * as Replacement from "../src/Replacement.js"
 import { bindEditor, makeEditor, model, SettingsService } from "./fixtures.js"
@@ -64,12 +63,10 @@ describe("capability dependencies", () => {
 
       const Def = Reconciler.define((define) => {
         const Settings = define.one("Settings", {
-          key: Key.number,
           start: (revision: number) =>
             Effect.succeed(Context.make(SettingsService, { revision }))
         })
         const Dep = define.one("Dep", {
-          key: Key.null,
           requires: { settings: Settings },
           // Overlap: D#2 may start while D#1 is still being torn down.
           replacement: Replacement.overlap(),
@@ -86,7 +83,6 @@ describe("capability dependencies", () => {
         })
         // Only ever admitted beneath a Running Dep generation.
         const Probe = define.one("Probe", {
-          key: Key.null,
           owner: Dep,
           start: () =>
             Effect.gen(function* () {
@@ -123,13 +119,11 @@ describe("capability dependencies", () => {
     Effect.gen(function* () {
       const Def = Reconciler.define((define) => {
         const Provider = define.many("Provider", {
-          key: Key.string,
-          start: () => Effect.void
+          start: (_: null) => Effect.void
         })
         const Dep = define.one("Dep", {
-          key: Key.null,
           requires: { provider: Provider },
-          start: () => Effect.void
+          start: (_: null) => Effect.void
         })
         return { Provider, Dep }
       })
@@ -140,17 +134,17 @@ describe("capability dependencies", () => {
       const result = yield* Effect.result(Reconciler.make(bound))
       expect(result._tag).toBe("Failure")
       if (result._tag === "Failure") {
-        expect(result.failure._tag).toBe("DefinitionError")
+        expect(result.failure._tag).toBe("AmbiguousProvider")
       }
     }))
 
   it.live("cross-definition handles are rejected at creation", () =>
     Effect.gen(function* () {
       const A = Reconciler.define((define) => ({
-        Thing: define.one("Thing", { key: Key.string, start: () => Effect.void })
+        Thing: define.one("Thing", { start: (_: null) => Effect.void })
       }))
       const B = Reconciler.define((define) => ({
-        Other: define.one("Other", { key: Key.string, start: () => Effect.void })
+        Other: define.one("Other", { start: (_: null) => Effect.void })
       }))
       const bound = A.bind<{}>((bind) => ({
         // Handle from definition B bound against definition A.
@@ -159,7 +153,7 @@ describe("capability dependencies", () => {
       const result = yield* Effect.result(Reconciler.make(bound))
       expect(result._tag).toBe("Failure")
       if (result._tag === "Failure") {
-        expect(result.failure._tag).toBe("BindingError")
+        expect(result.failure._tag).toBe("ForeignHandle")
       }
     }))
 })

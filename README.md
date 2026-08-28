@@ -18,19 +18,18 @@ deliberately deferred (plan §3).
 
 ```ts
 import { Context, Effect, Option } from "effect"
-import { Key, Reconciler, Replacement } from "effect-reconciler"
+import { Reconciler, Replacement } from "effect-reconciler"
 
-// 1. Define the static architecture once (state-independent).
+// 1. Define the static architecture once (state-independent). The semantic key
+//    type is inferred from `start`; identity is Effect's Equal/Hash.
 const Editor = Reconciler.define((define) => {
   const Session = define.one("Session", {
-    key: Key.string,
     replacement: Replacement.overlap(),
-    start: (userId) => Effect.succeed(Context.make(SessionService, { userId }))
+    start: (userId: string) => Effect.succeed(Context.make(SessionService, { userId }))
   })
   const Workspace = define.one("Workspace", {
-    key: Key.string,
     owner: Session, // ownership: Workspace never outlives its Session
-    start: (workspaceId) =>
+    start: (workspaceId: string) =>
       Effect.gen(function* () {
         const session = yield* SessionService // ordinary Effect service access
         // acquireRelease / addFinalizer are tied to this lifetime's Scope
@@ -64,10 +63,9 @@ environment, and provider replacement structurally replaces dependents
 
 ```ts
 const Diagnostics = define.one("Diagnostics", {
-  key: Key.null,
   owner: Document,
   requires: { settings: Settings, language: Language },
-  start: () =>
+  start: (_: null) =>
     Effect.gen(function* () {
       const settings = yield* SettingsService
       const language = yield* LanguageService
@@ -81,20 +79,34 @@ its key, and its owner path. Failures arrive as one, `status` and `retry` take
 one:
 
 ```ts
-const failures = yield* controller.failures // subscription owned by this Scope
-const failure = yield* PubSub.take(failures)
-failure.lifetime.family.name // "Server"
-failure.lifetime.key // "typescript"
-failure.lifetime.parent?.key // the Workspace it failed beneath
-failure.cause // why startup failed
+// A live Stream of failures, for reacting.
+yield* Stream.runForEach(controller.failures, (failure) => {
+  failure.lifetime.family.name // "Server"
+  failure.lifetime.key // "typescript"
+  failure.lifetime.parent?.key // the Workspace it failed beneath
+  failure.cause // why startup failed
+  return show(failure)
+})
 
-// Status is authoritative; notifications are a live convenience that may be
-// missed, so state that depends on failure stays discoverable.
-const state = yield* controller.status(failure.lifetime) // Failed(cause)
+// Status is authoritative, for remembering: notifications are lossy under
+// overflow, so state that depends on failure stays discoverable here.
+const state = yield* controller.status(ref) // Option<Starting|Running|Failed|Stopping>
 
 // The environment gets fixed: retry the same semantic key. No retry nonce in
 // the model, no withdrawing and restoring desire.
-yield* controller.retry(failure.lifetime)
+yield* controller.retry(ref)
+```
+
+Expected failures are tagged data, so recovery is ordinary Effect:
+
+```ts
+Reconciler.make(Bound).pipe(
+  Effect.catchTags({
+    AmbiguousProvider: (e) => report(`${e.family.name}.${e.requirement}`),
+    MissingBinding: (e) => report(`no selector for ${e.family.name}`)
+    // ...
+  })
+)
 ```
 
 Startup environments are typed. Whatever a `start` Effect needs beyond its own
@@ -133,6 +145,8 @@ measured.
 - shutdown is idempotent, interrupts startups, awaits structured
   finalization; commits after shutdown fail with `ControllerClosed`
 - one Definition binds to multiple state types
+- semantic keys are ordinary Effect values compared with `Equal`/`Hash`, so
+  structural keys need no encoding and cannot collide
 - a failed lifetime holds its slot, so recommitting the same state is not an
   implicit retry; `retry` retires the failed generation under the same key
 - owned selectors see the whole semantic owner path, so identical direct-owner

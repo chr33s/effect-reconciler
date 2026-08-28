@@ -10,11 +10,10 @@
  */
 import { describe, expect, it } from "@effect/vitest"
 import { Context, Deferred, Effect, Fiber, Option } from "effect"
-import * as Key from "../src/Key.js"
 import type { ControllerClosed } from "../src/Errors.js"
 import * as Reconciler from "../src/Reconciler.js"
 import * as Replacement from "../src/Replacement.js"
-import { eventually, holding, idle, StartupFailed } from "./util.js"
+import { eventually, holding, idle, StartupFailed, statusTag } from "./util.js"
 
 class ProviderService extends Context.Service<ProviderService, {
   readonly revision: number
@@ -27,7 +26,6 @@ describe("retry", () => {
       let healthy = false
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
-          key: Key.string,
           start: (k: string) =>
             Effect.gen(function* () {
               log.push(`attempt:${k}`)
@@ -46,7 +44,7 @@ describe("retry", () => {
       yield* controller.commit({ key: "a" })
       yield* eventually(() => log.includes("attempt:a"), "first attempt")
       yield* idle(controller)
-      expect((yield* controller.status(ref))._tag).toBe("Failed")
+      expect(yield* statusTag(controller, ref)).toBe("Failed")
 
       // Recommitting the same state is not a retry: nothing happens.
       yield* controller.commit({ key: "a" })
@@ -59,7 +57,7 @@ describe("retry", () => {
       yield* idle(controller)
 
       expect(log).toEqual(["attempt:a", "attempt:a", "running:a"])
-      expect((yield* controller.status(ref))._tag).toBe("Running")
+      expect(yield* statusTag(controller, ref)).toBe("Running")
     }))
 
   it.live("§1.2 — a failed owned lifetime retries under the same key", () =>
@@ -68,11 +66,9 @@ describe("retry", () => {
       let healthy = false
       const Def = Reconciler.define((define) => {
         const Session = define.one("Session", {
-          key: Key.string,
-          start: () => Effect.void
+          start: (_user: string) => Effect.void
         })
         const Child = define.one("Child", {
-          key: Key.string,
           owner: Session,
           start: (k: string) =>
             Effect.gen(function* () {
@@ -98,21 +94,20 @@ describe("retry", () => {
       yield* controller.commit({})
       yield* eventually(() => log.includes("attempt:c"), "first attempt")
       yield* idle(controller)
-      expect((yield* controller.status(ref))._tag).toBe("Failed")
+      expect(yield* statusTag(controller, ref)).toBe("Failed")
 
       healthy = true
       yield* controller.retry(ref)
       yield* eventually(() => log.includes("running:c"), "retried under the same owner")
-      expect((yield* controller.status(ref))._tag).toBe("Running")
+      expect(yield* statusTag(controller, ref)).toBe("Running")
     }))
 
   it.live("§1.3 — retry is a no-op once the owner is no longer current", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => {
-        const Session = define.one("Session", { key: Key.string, start: () => Effect.void })
+        const Session = define.one("Session", { start: (_user: string) => Effect.void })
         const Child = define.one("Child", {
-          key: Key.string,
           owner: Session,
           start: (k: string) =>
             Effect.gen(function* () {
@@ -143,7 +138,7 @@ describe("retry", () => {
       yield* idle(controller)
       const attemptsUnderBob = log.length
 
-      expect((yield* controller.status(underAlice))._tag).toBe("NotDesired")
+      expect(yield* statusTag(controller, underAlice)).toBe("None")
       yield* controller.retry(underAlice)
       yield* idle(controller)
       expect(log).toHaveLength(attemptsUnderBob)
@@ -155,12 +150,10 @@ describe("retry", () => {
       let healthy = false
       const Def = Reconciler.define((define) => {
         const Provider = define.one("Provider", {
-          key: Key.number,
           start: (revision: number) =>
             Effect.succeed(Context.make(ProviderService, { revision }))
         })
         const Dependent = define.one("Dependent", {
-          key: Key.string,
           requires: { provider: Provider },
           start: (k: string) =>
             Effect.gen(function* () {
@@ -187,18 +180,18 @@ describe("retry", () => {
       // With the provider withdrawn the dependent cannot be admitted at all.
       yield* controller.commit({ provider: Option.none() })
       yield* idle(controller)
-      expect((yield* controller.status(ref))._tag).toBe("Pending")
+      expect(yield* statusTag(controller, ref)).toBe("None")
 
       healthy = true
       yield* controller.retry(ref)
       yield* idle(controller)
       expect(log).toEqual(["attempt:d:r1"])
-      expect((yield* controller.status(ref))._tag).toBe("Pending")
+      expect(yield* statusTag(controller, ref)).toBe("None")
 
       // Once a provider is Running again, the fresh generation is admitted.
       yield* controller.commit({ provider: Option.some(2) })
       yield* eventually(() => log.includes("running:d:r2"), "admitted against provider 2")
-      expect((yield* controller.status(ref))._tag).toBe("Running")
+      expect(yield* statusTag(controller, ref)).toBe("Running")
     }))
 
   it.live("§1.6 — repeated retry is idempotent", () =>
@@ -206,7 +199,6 @@ describe("retry", () => {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
-          key: Key.string,
           start: (k: string) =>
             Effect.gen(function* () {
               log.push(`attempt:${k}`)
@@ -242,13 +234,13 @@ describe("retry", () => {
       yield* idle(controller)
 
       expect(log).toEqual(["attempt:a", "attempt:a"])
-      expect((yield* controller.status(ref))._tag).toBe("Failed")
+      expect(yield* statusTag(controller, ref)).toBe("Failed")
     }))
 
   it.live("§1.7 — retry after shutdown fails with ControllerClosed", () =>
     Effect.gen(function* () {
       const Def = Reconciler.define((define) => ({
-        Res: define.one("Res", { key: Key.string, start: () => Effect.void })
+        Res: define.one("Res", { start: (_key: string) => Effect.void })
       }))
       const controller = yield* Reconciler.make(
         Def.bind<{}>((bind) => ({ res: bind.one(Def.Res, () => Option.none()) }))
@@ -271,7 +263,6 @@ describe("retry", () => {
       let healthy = false
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
-          key: Key.string,
           replacement: Replacement.sequential(),
           start: (k: string) =>
             Effect.gen(function* () {
@@ -311,7 +302,6 @@ describe("retry", () => {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
-          key: Key.string,
           start: (k: string) =>
             Effect.gen(function* () {
               log.push(`start:${k}`)
@@ -326,13 +316,13 @@ describe("retry", () => {
 
       yield* controller.commit({})
       yield* eventually(() => log.includes("start:a"), "running")
-      expect((yield* controller.status(ref))._tag).toBe("Running")
+      expect(yield* statusTag(controller, ref)).toBe("Running")
 
       yield* controller.retry(ref)
       yield* idle(controller)
 
       expect(log).toEqual(["start:a"])
-      expect((yield* controller.status(ref))._tag).toBe("Running")
+      expect(yield* statusTag(controller, ref)).toBe("Running")
     }))
 
   it.live("§1.10 — retry preserves semantic identity, so children keep their path", () =>
@@ -341,7 +331,6 @@ describe("retry", () => {
       let healthy = false
       const Def = Reconciler.define((define) => {
         const Parent = define.one("Parent", {
-          key: Key.string,
           start: (k: string) =>
             Effect.gen(function* () {
               log.push(`parent:${k}`)
@@ -349,7 +338,6 @@ describe("retry", () => {
             })
         })
         const Child = define.many("Child", {
-          key: Key.string,
           owner: Parent,
           start: (k: string) => Effect.sync(() => log.push(`child:${k}`))
         })
@@ -367,7 +355,7 @@ describe("retry", () => {
       yield* controller.commit({})
       yield* eventually(() => log.includes("parent:p"), "parent failed")
       yield* idle(controller)
-      expect((yield* controller.status(childRef))._tag).toBe("Pending")
+      expect(yield* statusTag(controller, childRef)).toBe("None")
 
       healthy = true
       yield* controller.retry(parentRef)
@@ -376,7 +364,7 @@ describe("retry", () => {
       // The key never changed, so the child's owner-relative identity is the
       // one the binding always described.
       expect(log).toEqual(["parent:p", "parent:p", "child:p-1"])
-      expect((yield* controller.status(parentRef))._tag).toBe("Running")
-      expect((yield* controller.status(childRef))._tag).toBe("Running")
+      expect(yield* statusTag(controller, parentRef)).toBe("Running")
+      expect(yield* statusTag(controller, childRef)).toBe("Running")
     }))
 })

@@ -20,7 +20,6 @@
  */
 import { describe, expect, it } from "@effect/vitest"
 import { Context, Effect, Option } from "effect"
-import * as Key from "../src/Key.js"
 import * as Reconciler from "../src/Reconciler.js"
 import { idle } from "../test/util.js"
 
@@ -67,30 +66,24 @@ const makeEditor = (counters: Counters) => {
 
   return Reconciler.define((define) => {
     const Settings = define.one("Settings", {
-      key: Key.number,
       start: (revision: number) => started(Context.make(SettingsService, { revision }))
     })
     const Session = define.one("Session", {
-      key: Key.string,
       start: () => started(undefined)
     })
     const Workspace = define.one("Workspace", {
-      key: Key.string,
       owner: Session,
       start: () => started(undefined)
     })
     const Language = define.one("Language", {
-      key: Key.string,
       owner: Workspace,
       start: (language: string) => started(Context.make(LanguageService, { language }))
     })
     const Document = define.many("Document", {
-      key: Key.string,
       owner: Workspace,
       start: (uri: string) => started(Context.make(DocumentService, { uri }))
     })
     const Diagnostics = define.one("Diagnostics", {
-      key: Key.null,
       owner: Document,
       requires: { settings: Settings, language: Language },
       start: () =>

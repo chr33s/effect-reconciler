@@ -11,10 +11,9 @@
  * ownership and capability story is stated once as a Definition. Lines marked
  * `@integration` are the cost of using the reconciler at all.
  */
-import { Context, Effect, Option, PubSub, Schema as S, Stream } from "effect"
+import { Context, Effect, Option, Schema as S, Stream } from "effect"
 import { Message as FoldkitMessage } from "foldkit"
 import type { Update } from "foldkit"
-import * as Key from "../../../src/Key.js"
 import * as Reconciler from "../../../src/Reconciler.js"
 import { Backend, type BackendApi, type Diagnostic, type ServerHandle } from "../backend.js"
 import * as Driver from "../driver.js"
@@ -137,23 +136,20 @@ class Dispatch extends Context.Service<Dispatch, {
 
 export const Editor = Reconciler.define((define) => {
   const Settings = define.one("Settings", {
-    key: Key.number,
     start: (revision: number) => Effect.succeed(Context.make(SettingsService, { revision }))
   })
 
   const Session = define.one("Session", {
-    key: Key.string,
-    start: () => Effect.void
+    start: (_user: string) => Effect.void
   })
 
   const Workspace = define.one("Workspace", {
-    key: Key.string,
     owner: Session,
-    start: () => Effect.void
+    start: (_workspaceId: string) => Effect.void
   })
 
+  // The key is the language, inferred from `start`.
   const Server = define.one("Server", {
-    key: Key.string, // the language
     owner: Workspace,
     start: (language: string) =>
       Effect.gen(function* () {
@@ -175,8 +171,8 @@ export const Editor = Reconciler.define((define) => {
       })
   })
 
+  // The key is the document uri.
   const Analyzer = define.many("Analyzer", {
-    key: Key.string, // the document uri
     owner: Server,
     requires: { settings: Settings },
     start: (uri: string) =>
@@ -253,12 +249,11 @@ export const start = (backend: BackendApi) =>
     })
     dispatch = session.dispatch
 
-    const failures = yield* controller.failures
+    // The failure Stream is a live convenience; `controller.status` remains
+    // the authority if a notification is ever missed.
     yield* Effect.forkScoped(
-      Effect.forever(
-        Effect.flatMap(PubSub.take(failures), (failure) =>
-          session.dispatch(Message.LifetimeFailed({ family: failure.lifetime.family.name }))
-        )
+      Stream.runForEach(controller.failures, (failure) =>
+        session.dispatch(Message.LifetimeFailed({ family: failure.lifetime.family.name }))
       )
     )
 

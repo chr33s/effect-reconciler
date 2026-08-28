@@ -10,8 +10,8 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Option } from "effect"
 import { HandleTypeId, type OneHandle } from "../src/Definition.js"
-import * as Key from "../src/Key.js"
 import * as Reconciler from "../src/Reconciler.js"
+import { statusTag } from "./util.js"
 
 /** A handle-shaped value carrying the global brand but a foreign identity:
  * what a second installed copy of this package would hand you. */
@@ -21,11 +21,10 @@ const foreignHandle = (): OneHandle<string> =>
     name: "Thing",
     identity: {},
     familyId: 0,
-    key: Key.string,
     owner: undefined,
     requires: {},
     replacement: "sequential",
-    start: () => Effect.void
+    start: (_: null) => Effect.void
   }) as unknown as OneHandle<string>
 
 describe("definition identity", () => {
@@ -34,10 +33,10 @@ describe("definition identity", () => {
       // Both Definitions declare one family named "Thing", so both handles
       // have family index 0 and the same label.
       const A = Reconciler.define((define) => ({
-        Thing: define.one("Thing", { key: Key.string, start: () => Effect.void })
+        Thing: define.one("Thing", { start: (_: null) => Effect.void })
       }))
       const B = Reconciler.define((define) => ({
-        Thing: define.one("Thing", { key: Key.string, start: () => Effect.void })
+        Thing: define.one("Thing", { start: (_: null) => Effect.void })
       }))
 
       expect(A.Thing.name).toBe(B.Thing.name)
@@ -48,7 +47,7 @@ describe("definition identity", () => {
       )
       expect(result._tag).toBe("Failure")
       if (result._tag === "Failure") {
-        expect(result.failure._tag).toBe("BindingError")
+        expect(result.failure._tag).toBe("ForeignHandle")
       }
     }))
 
@@ -58,22 +57,21 @@ describe("definition identity", () => {
 
       // As a binding target.
       const Def = Reconciler.define((define) => ({
-        Thing: define.one("Thing", { key: Key.string, start: () => Effect.void })
+        Thing: define.one("Thing", { start: (_: null) => Effect.void })
       }))
       const bound = yield* Effect.result(
         Reconciler.make(Def.bind<{}>((bind) => ({ thing: bind.one(foreign, () => Option.none()) })))
       )
       expect(bound._tag).toBe("Failure")
       if (bound._tag === "Failure") {
-        expect(bound.failure._tag).toBe("BindingError")
+        expect(bound.failure._tag).toBe("ForeignHandle")
       }
 
       // As an owner.
       const Owned = Reconciler.define((define) => ({
         Child: define.one("Child", {
-          key: Key.string,
           owner: foreign,
-          start: () => Effect.void
+          start: (_: null) => Effect.void
         })
       }))
       const owned = yield* Effect.result(
@@ -81,15 +79,14 @@ describe("definition identity", () => {
       )
       expect(owned._tag).toBe("Failure")
       if (owned._tag === "Failure") {
-        expect(owned.failure._tag).toBe("DefinitionError")
+        expect(owned.failure._tag).toBe("ForeignOwner")
       }
 
       // As a capability requirement.
       const Requiring = Reconciler.define((define) => ({
         Dependent: define.one("Dependent", {
-          key: Key.string,
           requires: { provider: foreign },
-          start: () => Effect.void
+          start: (_: null) => Effect.void
         })
       }))
       const requiring = yield* Effect.result(
@@ -101,7 +98,7 @@ describe("definition identity", () => {
       )
       expect(requiring._tag).toBe("Failure")
       if (requiring._tag === "Failure") {
-        expect(requiring.failure._tag).toBe("DefinitionError")
+        expect(requiring.failure._tag).toBe("ForeignRequirement")
       }
     }))
 
@@ -111,11 +108,9 @@ describe("definition identity", () => {
       // Two families with the same key type; the second has family index 1.
       const Def = Reconciler.define((define) => ({
         First: define.one("First", {
-          key: Key.string,
           start: (k: string) => Effect.sync(() => log.push(`first:${k}`))
         }),
         Second: define.one("Second", {
-          key: Key.string,
           start: (k: string) => Effect.sync(() => log.push(`second:${k}`))
         })
       }))
@@ -127,16 +122,12 @@ describe("definition identity", () => {
       )
 
       // Same key, different family: the references are not interchangeable.
-      expect((yield* controller.status(Reconciler.ref(Def.First, "x", null)))._tag).toBe(
-        "NotDesired"
-      )
+      expect(yield* statusTag(controller, Reconciler.ref(Def.First, "x", null))).toBe("None")
       yield* controller.commit({})
       yield* Effect.sleep(20)
 
-      expect((yield* controller.status(Reconciler.ref(Def.First, "x", null)))._tag).toBe("Running")
-      expect((yield* controller.status(Reconciler.ref(Def.Second, "x", null)))._tag).toBe(
-        "NotDesired"
-      )
+      expect(yield* statusTag(controller, Reconciler.ref(Def.First, "x", null))).toBe("Running")
+      expect(yield* statusTag(controller, Reconciler.ref(Def.Second, "x", null))).toBe("None")
       expect(log).toEqual(["first:x"])
     }))
 })
