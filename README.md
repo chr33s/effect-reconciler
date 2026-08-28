@@ -140,6 +140,12 @@ More complete examples:
 - [`examples/foldkit-migration`](examples/foldkit-migration/README.md) — an
   upstream Foldkit example app migrated onto it, including where that did not
   pay off.
+- [`examples/ui`](examples/ui/README.md) — React, Solid and Lit adapters over
+  a shared synchronous mirror of `Controller.status`, and what v0 is missing
+  for them (a change notification: the mirror polls).
+- [`examples/cli`](examples/cli/README.md) — a REPL as the control plane, with
+  real listeners and file watches, so `EADDRINUSE` / `ENOENT` exercise failure,
+  `status` and `retry` end to end.
 
 ## Semantics proven by the conformance suite
 
