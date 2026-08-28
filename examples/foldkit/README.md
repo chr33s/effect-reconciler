@@ -36,6 +36,7 @@ It was chosen because it carries every trait Phase 4 asks for:
 | provider-dependent resources | analyzers capture a server generation *and* a settings revision |
 | rapid key churn | documents open and close faster than analyzers start |
 | startup failure | `cobol` has no server; the UI must say so |
+| user-visible retry | the user fixes the environment and presses Retry (spec.2 §5) |
 | child resource lifetimes | one analyzer per open document, owned by the connection |
 
 ## The two versions
@@ -76,6 +77,11 @@ Both versions pass identically — the migration preserved behaviour.
 4. the latest desired language wins after rapid changes
 5. a document reopened during cleanup never runs two analyzers
 
+`scenario.test.ts` also runs the release-gating retry story from `spec.2` §5
+against both: an unsupported language fails, the user retries while it is
+still broken and gets a fresh failure, the environment is fixed, and one more
+press brings up the server and everything that was waiting on it.
+
 For the "before" version these five test **application code**: every rule is
 hand-written in `before/app.ts` and a real project would maintain them forever.
 For the "after" version the application contains no lifetime rules at all, so
@@ -90,17 +96,18 @@ Counted from the source by `metrics.mjs`, not asserted in prose:
 ```text
 metric                                  before   after    delta
 ---------------------------------------------------------------
-Model fields, total                         11       7     -36%
-Model fields, lifecycle-only                 4       0    -100%
-Message variants, total                     14      10     -29%
-Message variants, lifecycle-only             5       1     -80%
-Lifecycle-marked lines                      25       0    -100%
+Model fields, total                         12       7     -42%
+Model fields, lifecycle-only                 5       0    -100%
+Message variants, total                     15      12     -20%
+Message variants, lifecycle-only             5       2     -60%
+Lifecycle-marked lines                      28       0    -100%
 Manual provider invalidation sites           1       0    -100%
+Retry nonce fields in the Model              1       0    -100%
 Commands (lifecycle)                         2       0    -100%
-Domain branches running the supervisor      13       0    -100%
-Coordination SLOC                          135      67     -50%
-  reconciler integration SLOC                0      26      +26
-Application SLOC, whole feature            215     167     -22%
+Domain branches running the supervisor      14       0    -100%
+Coordination SLOC                          143      67     -53%
+  reconciler integration SLOC                0      49      +49
+Application SLOC, whole feature            232     198     -15%
 Lifecycle race tests owned by the app        5       0    -100%
 ```
 
@@ -120,14 +127,22 @@ Reading the rows against the Phase 5 categories:
 - **Manual provider invalidation** disappears. Comparing each analyzer's
   captured `serverId` and `settingsRevision` against the current ones becomes
   `requires: { settings: Settings }`.
+- **Retry pollutes domain identity in one version only.** A Managed Resource
+  re-acquires when its *requirements* change, so "try the same server again"
+  has to be expressed as `serverAttempt: number` in the Model, threaded into
+  the requirements that describe which server is wanted. The reconciler
+  version calls `controller.retry(ref)` against the key the Model already
+  describes: no nonce, no withdrawn desire, no change to the Model at all.
 - **Race tests** move out of the application entirely.
 - **Coordination SLOC** halves: 135 hand-written lines become a 67-line
   Definition and Binding, of which 26 are the integration wiring that any app
   pays once regardless of how many families it declares.
 
 The 30–50% target in `docs/spec.1.md` §14 is met on lifecycle-specific code
-(−50%), while the whole feature shrinks by a more modest 22% — the domain half
-of the app is untouched, which is what should happen.
+(−53%), while the whole feature shrinks by a more modest 15% — the domain half
+of the app is untouched, which is what should happen. Integration is now 49
+lines rather than 26, because the retry flow needs a semantic reference built
+from the Model; that is a cost paid once per application, not per family.
 
 ## What this does and does not establish
 

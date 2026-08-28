@@ -4,7 +4,7 @@
  */
 import { Context, Effect, Option } from "effect"
 import * as Key from "../src/Key.js"
-import type { Owner } from "../src/Owner.js"
+import type { LifetimeRef } from "../src/LifetimeRef.js"
 import * as Reconciler from "../src/Reconciler.js"
 
 const Def = Reconciler.define((define) => {
@@ -54,8 +54,10 @@ Def.bind<State>((bind) => ({
 }))
 
 Def.bind<State>((bind) => ({
-  // @ts-expect-error — wrong owner key type: Workspace's owner key is a string
-  workspace: bind.one(Def.Workspace, (_s, owner: Owner<number, null>) => Option.some("acme"))
+  // @ts-expect-error — wrong owner family: Workspace is owned by Session
+  workspace: bind.one(Def.Workspace, (_s, owner: LifetimeRef<typeof Def.Document>) =>
+    Option.some(owner.key)
+  )
 }))
 
 // The owner reference is the whole semantic path, statically typed: a Document

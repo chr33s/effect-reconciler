@@ -2,7 +2,7 @@ import type * as Context from "effect/Context"
 import type * as Effect from "effect/Effect"
 import type * as Scope from "effect/Scope"
 import type { Key } from "./Key.js"
-import type { Owner } from "./Owner.js"
+import type { LifetimeRef } from "./LifetimeRef.js"
 import type { ReplacementPolicy } from "./Replacement.js"
 
 export const HandleTypeId: unique symbol = Symbol.for("effect-reconciler/Handle")
@@ -76,9 +76,10 @@ export type OwnerOf<H> = H extends OneHandle<infer _K, infer Own, infer _P, infe
 
 /**
  * The owner reference the children of `O` receive: `null` when `O` is absent
- * (a root family), otherwise `O`'s key linked to `O`'s own owner reference.
+ * (a root family), otherwise a reference to `O` itself, which carries `O`'s
+ * key and its own owner chain.
  */
-export type OwnerRefFor<O> = [O] extends [never] ? null : Owner<KeyOf<O>, OwnerOf<O>>
+export type OwnerRefFor<O> = [O] extends [never] ? null : LifetimeRef<Extract<O, AnyHandle>>
 
 /** The services a family publishes to its children and dependents. */
 export type ProvidesOf<H> = H extends OneHandle<infer _K, infer _Own, infer P, infer _E, infer _RR> ? P
@@ -181,10 +182,19 @@ export interface DefineApi {
 // Internal representation (not part of the public vocabulary)
 // -----------------------------------------------------------------------------
 
+/**
+ * The unforgeable identity of one Definition. A per-call object, compared by
+ * reference: two duplicate installed copies of this package, or two
+ * Definitions that happen to declare families in the same order, can never be
+ * mistaken for each other the way module-local counters could.
+ */
+export type DefinitionIdentity = { readonly definition: unique symbol }
+
 export interface InternalHandle {
   readonly [HandleTypeId]: "one" | "many"
   readonly name: string
-  readonly builderId: number
+  readonly identity: DefinitionIdentity
+  /** Index of this family within its own Definition, in creation order. */
   readonly familyId: number
   readonly key: Key<any>
   readonly owner: AnyHandle | undefined
@@ -201,6 +211,6 @@ export const asInternal = (handle: AnyHandle): InternalHandle =>
 
 /** The compiled-from source of a Definition: every family in creation order. */
 export interface DefinitionSource {
-  readonly builderId: number
+  readonly identity: DefinitionIdentity
   readonly families: ReadonlyArray<InternalHandle>
 }

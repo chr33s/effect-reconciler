@@ -1,3 +1,5 @@
+import type * as Cause from "effect/Cause"
+import * as CauseModule from "effect/Cause"
 import * as Context from "effect/Context"
 import * as Deferred from "effect/Deferred"
 import * as Effect from "effect/Effect"
@@ -11,8 +13,10 @@ import * as Scope from "effect/Scope"
 import * as Semaphore from "effect/Semaphore"
 import type { BindingEntry } from "../Binding.js"
 import { ControllerClosed, type CommitError } from "../Errors.js"
+import { asInternal, isHandle } from "../Definition.js"
 import type { LifetimeFailure } from "../Failure.js"
-import type { Owner } from "../Owner.js"
+import type { LifetimeRef } from "../LifetimeRef.js"
+import type { LifetimeStatus } from "../Status.js"
 import type { Compiled, CompiledFamily, CompiledRequirement } from "./compiledDefinition.js"
 import {
   emptySnapshot,
@@ -38,6 +42,8 @@ interface LiveInstance {
   status: Status
   obsolete: boolean
   providedContext: Context.Context<never>
+  /** Why startup failed, for `status`. Set only in the `failed` state. */
+  failure: Cause.Cause<unknown> | null
   /**
    * Set when a dedicated close of this instance's Scope is initiated
    * (obsolescence or startup failure) and completed only when that close has
@@ -78,6 +84,8 @@ export interface TestHooks {
 export interface ControllerInternal<State> {
   readonly commit: (state: State) => Effect.Effect<void, CommitError>
   readonly failures: Effect.Effect<PubSub.Subscription<LifetimeFailure>, never, Scope.Scope>
+  readonly status: (ref: LifetimeRef) => Effect.Effect<LifetimeStatus>
+  readonly retry: (ref: LifetimeRef) => Effect.Effect<void, ControllerClosed>
   readonly shutdown: Effect.Effect<void>
   readonly [TestHooksId]: TestHooks
 }
@@ -229,13 +237,16 @@ export const makeController = <State>(
           // an interrupted exit reaching this point means the start Effect
           // interrupted itself — treated as failure, not left wedged.
           inst.status = "failed"
+          inst.failure = exit.cause
+          // Only a failure whose semantic desire is still current is an
+          // application-visible failure. Desire can have been withdrawn
+          // between admission and this completion, before the reconcile pass
+          // that will obsolete this generation has even run.
+          const stillDesired = desired.byPath.has(inst.path)
           return pipe(
-            PubSub.publish(failureLog, {
-              family: compiled.families[inst.familyId]!.name,
-              key: inst.key,
-              owner: semanticOwner(inst.owner),
-              cause: exit.cause
-            }),
+            stillDesired
+              ? PubSub.publish(failureLog, { lifetime: semanticRef(inst), cause: exit.cause })
+              : Effect.void,
             Effect.andThen(
               pipe(
                 Effect.uninterruptible(closeInstance(inst, exit)),
@@ -247,13 +258,29 @@ export const makeController = <State>(
         })
       )
 
-    /** The purely semantic reference chain of a live instance. */
-    const semanticOwner = (inst: LiveInstance | null): Owner<unknown, unknown> | null =>
-      inst === null ? null : {
-        family: compiled.families[inst.familyId]!.name,
-        key: inst.key,
-        parent: semanticOwner(inst.owner)
+    /** The purely semantic reference of a live instance. */
+    const semanticRef = (inst: LiveInstance): LifetimeRef => ({
+      family: compiled.families[inst.familyId]!.handle,
+      key: inst.key,
+      parent: inst.owner === null ? null : semanticRef(inst.owner)
+    }) as LifetimeRef
+
+    /**
+     * The internal path a semantic reference names. A reference whose family
+     * belongs to another Definition cannot name anything here and is a
+     * programming error, so it is reported as a defect rather than silently
+     * matching nothing.
+     */
+    const pathOf = (ref: LifetimeRef): string => {
+      if (!isHandle(ref.family) || asInternal(ref.family).identity !== compiled.identity) {
+        throw new Error(
+          "effect-reconciler: LifetimeRef names a family from a different Definition"
+        )
       }
+      const family = compiled.families[asInternal(ref.family).familyId]!
+      const parent = ref.parent === null ? "" : pathOf(ref.parent as LifetimeRef)
+      return parent + "/" + family.id + ":" + encodeURIComponent(family.key.encode(ref.key))
+    }
 
     const resolveProvider = (
       node: DesiredNode,
@@ -294,6 +321,7 @@ export const makeController = <State>(
           status: "starting",
           obsolete: false,
           providedContext: Context.empty(),
+          failure: null,
           closing: null
         }
         slot.current = inst
@@ -464,6 +492,69 @@ export const makeController = <State>(
         )
       })
 
+    /**
+     * The authoritative state of one semantic lifetime. Read under the same
+     * mutex the reconciler mutates under, so it never observes a half-applied
+     * pass.
+     */
+    const status = (ref: LifetimeRef): Effect.Effect<LifetimeStatus> =>
+      mutex.withPermits(1)(
+        Effect.sync((): LifetimeStatus => {
+          const path = pathOf(ref)
+          const inst = currentByPath.get(path)
+          if (inst !== undefined) {
+            switch (inst.status) {
+              case "starting":
+                return { _tag: "Starting" }
+              case "running":
+                return { _tag: "Running" }
+              case "failed":
+                return { _tag: "Failed", cause: inst.failure ?? CauseModule.empty }
+              case "stopping":
+                return { _tag: "Stopping" }
+            }
+          }
+          if (desired.byPath.has(path)) return { _tag: "Pending" }
+          for (const other of all) {
+            if (other.path === path) return { _tag: "Stopping" }
+          }
+          return { _tag: "NotDesired" }
+        })
+      )
+
+    /**
+     * Retire a Failed generation so a fresh one may be admitted under the same
+     * semantic key. Retry never changes semantic identity: it is the physical
+     * generation that is replaced, which is why an application never has to
+     * pollute its domain state with a retry nonce.
+     *
+     * It is a no-op unless the referenced lifetime is both still desired and
+     * currently Failed, and it is idempotent: a second call finds the failed
+     * generation already retiring.
+     */
+    const retry = (ref: LifetimeRef): Effect.Effect<void, ControllerClosed> =>
+      Effect.uninterruptible(
+        mutex.withPermits(1)(
+          Effect.suspend((): Effect.Effect<void, ControllerClosed> => {
+            if (!open) return Effect.fail(new ControllerClosed())
+            const path = pathOf(ref)
+            const inst = currentByPath.get(path)
+            if (inst === undefined || inst.status !== "failed") return Effect.void
+            if (!desired.byPath.has(path)) return Effect.void
+
+            // Retire it exactly as obsolescence does, so the replacement
+            // policy still governs when the fresh generation may start.
+            inst.obsolete = true
+            inst.status = "stopping"
+            const slot = getSlot(inst.slotId)
+            if (slot.current === inst) slot.current = undefined
+            slot.retiring.add(inst)
+            currentByPath.delete(path)
+            return Effect.andThen(beginStop(inst), wakeUp)
+          })
+        )
+      )
+
     const shutdownGate = yield* Deferred.make<void>()
     let shutdownStarted = false
     const shutdown: Effect.Effect<void> = Effect.uninterruptible(
@@ -510,6 +601,8 @@ export const makeController = <State>(
     return {
       commit,
       failures: PubSub.subscribe(failureLog),
+      status,
+      retry,
       shutdown,
       [TestHooksId]: { holding: mutex.withPermits(1), idle }
     }

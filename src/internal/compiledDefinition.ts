@@ -6,6 +6,8 @@ import {
   asInternal,
   HandleTypeId,
   isHandle,
+  type AnyHandle,
+  type DefinitionIdentity,
   type DefinitionSource
 } from "../Definition.js"
 import { BindingError, DefinitionError } from "../Errors.js"
@@ -32,6 +34,8 @@ export interface CompiledRequirement {
 export interface CompiledFamily {
   readonly id: number
   readonly name: string
+  /** The public handle: the family's authoritative semantic identity. */
+  readonly handle: AnyHandle
   readonly cardinality: "one" | "many"
   readonly key: Key<any>
   readonly ownerId: number | null
@@ -46,6 +50,8 @@ export interface CompiledFamily {
  * metadata. Family ids double as topological order (owners precede children,
  * providers precede dependents). */
 export interface Compiled {
+  /** The Definition these families came from, for foreign-handle checks. */
+  readonly identity: DefinitionIdentity
   readonly families: ReadonlyArray<CompiledFamily>
 }
 
@@ -60,7 +66,7 @@ export const compileDefinition = (
     let ownerId: number | null = null
     let chain: Array<number>
     if (handle.owner !== undefined) {
-      if (!isHandle(handle.owner) || asInternal(handle.owner).builderId !== source.builderId) {
+      if (!isHandle(handle.owner) || asInternal(handle.owner).identity !== source.identity) {
         return Result.fail(
           new DefinitionError({
             reason: `owner of "${handle.name}" is not a lifetime handle from this definition`
@@ -82,7 +88,7 @@ export const compileDefinition = (
     const ownerChain = chain.slice(0, -1)
     const requires: Array<CompiledRequirement> = []
     for (const [name, requirement] of Object.entries(handle.requires)) {
-      if (!isHandle(requirement) || asInternal(requirement).builderId !== source.builderId) {
+      if (!isHandle(requirement) || asInternal(requirement).identity !== source.identity) {
         return Result.fail(
           new DefinitionError({
             reason: `requirement "${name}" of "${handle.name}" is not a lifetime handle from this definition`
@@ -143,6 +149,7 @@ export const compileDefinition = (
     families.push({
       id: handle.familyId,
       name: handle.name,
+      handle: handle as unknown as AnyHandle,
       cardinality: handle[HandleTypeId],
       key: handle.key,
       ownerId,
@@ -152,7 +159,7 @@ export const compileDefinition = (
       start: handle.start
     })
   }
-  return Result.succeed({ families })
+  return Result.succeed({ identity: source.identity, families })
 }
 
 export const compileBinding = <State>(
@@ -161,7 +168,7 @@ export const compileBinding = <State>(
 ): Result.Result<ReadonlyMap<number, BindingEntry<State>>, BindingError> => {
   const entries = new Map<number, BindingEntry<State>>()
   for (const entry of binding.entries) {
-    if (!isHandle(entry.handle) || asInternal(entry.handle).builderId !== binding.source.builderId) {
+    if (!isHandle(entry.handle) || asInternal(entry.handle).identity !== binding.source.identity) {
       return Result.fail(
         new BindingError({
           reason: "binding references a lifetime handle that does not belong to this definition"

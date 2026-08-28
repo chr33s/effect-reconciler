@@ -80,11 +80,12 @@ describe("startup failure", () => {
       const failure = yield* PubSub.take(failures)
       // Enough for a control plane to say "language server failed" for this
       // session, and nothing more.
-      expect(failure.family).toBe("Language")
-      expect(failure.key).toBe("bad")
-      expect(failure.owner?.family).toBe("Session")
-      expect(failure.owner?.key).toBe("alice")
-      expect(failure.owner?.parent).toBe(null)
+      expect(failure.lifetime.family).toBe(Def.Language)
+      expect(failure.lifetime.family.name).toBe("Language")
+      expect(failure.lifetime.key).toBe("bad")
+      expect(failure.lifetime.parent?.family).toBe(Def.Session)
+      expect(failure.lifetime.parent?.key).toBe("alice")
+      expect(failure.lifetime.parent?.parent).toBe(null)
       const error = Cause.squash(failure.cause)
       expect((error as StartupFailed)._tag).toBe("StartupFailed")
 

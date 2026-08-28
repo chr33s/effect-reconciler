@@ -46,6 +46,13 @@ export interface Model {
   /** @lifecycle */ readonly analyzers: ReadonlyArray<RunningAnalyzer>
   /** @lifecycle */ readonly analyzersStarting: ReadonlyArray<string>
   /** @lifecycle */ readonly analyzersStopping: ReadonlyArray<string>
+  /**
+   * @lifecycle The retry nonce. A Managed Resource only re-acquires when its
+   * requirements change, so "try again with the same server" has to be
+   * expressed as a change in operational identity — inside the requirements
+   * that describe *which* server is wanted.
+   */
+  readonly serverAttempt: number
 }
 
 export const init: Model = {
@@ -59,7 +66,8 @@ export const init: Model = {
   server: Option.none(),
   analyzers: [],
   analyzersStarting: [],
-  analyzersStopping: []
+  analyzersStopping: [],
+  serverAttempt: 0
 }
 
 // -----------------------------------------------------------------------------
@@ -79,6 +87,7 @@ export const Message = FoldkitMessage.defineMessageUnion({
   OpenedDocument: { uri: S.String },
   ClosedDocument: { uri: S.String },
   ReceivedDiagnostic: { uri: S.String, message: S.String },
+  PressedRetry: {},
 
   // --- lifecycle facts ------------------------------------------------------
   /** @lifecycle */ AcquiredServer: { id: S.String, language: S.String },
@@ -203,6 +212,13 @@ export const makeApp = (backend: BackendApi) => {
       ReceivedDiagnostic: ({ uri, message: text }) => ({
         model: { ...model, diagnostics: [...model.diagnostics, { uri, message: text }] }
       }),
+      // @lifecycle Bumping the nonce is what actually forces the re-acquire.
+      PressedRetry: () =>
+        reconcileAnalyzers({
+          ...model,
+          serverUnavailable: false,
+          serverAttempt: model.serverAttempt + 1
+        }),
 
       // --- lifecycle transitions ---------------------------------------------
       // @coordination-begin
@@ -260,7 +276,16 @@ export const makeApp = (backend: BackendApi) => {
 
   const managedResources = ManagedResource.make<Model, Message>()((entry) => ({
     server: entry(
-      S.Option(S.Struct({ user: S.String, workspace: S.String, language: S.String })),
+      S.Option(
+        S.Struct({
+          user: S.String,
+          workspace: S.String,
+          language: S.String,
+          // @lifecycle Operational identity leaking into the description of
+          // which server is wanted.
+          attempt: S.Finite
+        })
+      ),
       {
         resource: LanguageServer,
         // @lifecycle The ownership predicate, stated here as well as in the
@@ -270,7 +295,8 @@ export const makeApp = (backend: BackendApi) => {
             ? Option.some({
               user: model.user.value,
               workspace: model.workspace.value,
-              language: model.language
+              language: model.language,
+              attempt: model.serverAttempt
             })
             : Option.none(),
         acquire: ({ language }) => backend.openServer(language),

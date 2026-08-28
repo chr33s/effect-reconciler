@@ -2,7 +2,7 @@ import * as Result from "effect/Result"
 import * as Option from "effect/Option"
 import type { BindingEntry } from "../Binding.js"
 import { InvalidDesiredState } from "../Errors.js"
-import type { Owner } from "../Owner.js"
+import type { LifetimeRef } from "../LifetimeRef.js"
 import type { Compiled } from "./compiledDefinition.js"
 
 /** One desired instance: family + semantic key, owner-relative. */
@@ -17,12 +17,11 @@ export interface DesiredNode {
   readonly chain: ReadonlyArray<DesiredNode>
   readonly childrenByFamily: ReadonlyMap<number, ReadonlyArray<DesiredNode>>
   /**
-   * The pure semantic reference handed to the selectors of this node's owned
-   * families: this node's family name and key, linked to its own owner. The
-   * chain is what lets an owned selector distinguish two identical direct
-   * owner keys under different ancestors.
+   * The pure semantic reference of this node: family handle, key and owner
+   * chain. Owned selectors receive their owner's, which is what lets them
+   * distinguish two identical direct owner keys under different ancestors.
    */
-  readonly ownerRef: Owner<unknown, unknown>
+  readonly ref: LifetimeRef
 }
 
 /** One coherent desired snapshot produced by evaluating a Binding against a
@@ -65,7 +64,7 @@ export const evaluate = <State>(
     const familyNodes: Array<DesiredNode> = []
 
     for (const parent of parents) {
-      const owner = parent === null ? null : parent.ownerRef
+      const owner = parent === null ? null : parent.ref
       let keys: Array<unknown>
       try {
         const result = entry.selector(state, owner)
@@ -111,10 +110,10 @@ export const evaluate = <State>(
           parent,
           chain: [],
           childrenByFamily,
-          ownerRef: {
-            family: family.name,
+          ref: {
+            family: family.handle,
             key,
-            parent: parent === null ? null : parent.ownerRef
+            parent: parent === null ? null : parent.ref
           }
         }
         ;(node as { chain: ReadonlyArray<DesiredNode> }).chain =

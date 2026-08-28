@@ -6,12 +6,17 @@ import {
   HandleTypeId,
   type AnyHandle,
   type DefineApi,
+  type DefinitionIdentity,
   type DefinitionSource,
   type InternalHandle,
+  type KeyOf,
+  type OwnerOf,
   type RootRequirementsOf
 } from "./Definition.js"
-import type { BindingError, CommitError, DefinitionError } from "./Errors.js"
+import type { BindingError, CommitError, ControllerClosed, DefinitionError } from "./Errors.js"
 import type { LifetimeFailure } from "./Failure.js"
+import type { LifetimeRef } from "./LifetimeRef.js"
+import type { LifetimeStatus } from "./Status.js"
 import { compileBinding, compileDefinition } from "./internal/compiledDefinition.js"
 import { makeController } from "./internal/controller.js"
 
@@ -27,8 +32,6 @@ export type Defined<H extends Record<string, AnyHandle>> = H & {
   ) => Binding<State, RootRequirementsOf<H[keyof H]>>
 }
 
-let nextBuilderId = 1
-
 /**
  * Define a static family architecture of keyed Effect lifetimes: cardinality,
  * semantic key equality, ownership, capability requirements, startup and
@@ -38,7 +41,10 @@ let nextBuilderId = 1
 export const define = <H extends Record<string, AnyHandle>>(
   f: (define: DefineApi) => H
 ): Defined<H> => {
-  const builderId = nextBuilderId++
+  // Unforgeable Definition identity: a fresh object per call, compared by
+  // reference, so handles from another Definition — including one from a
+  // duplicate installed copy of this package — can never pass as ours.
+  const identity = {} as DefinitionIdentity
   const families: Array<InternalHandle> = []
 
   const makeHandle =
@@ -47,7 +53,7 @@ export const define = <H extends Record<string, AnyHandle>>(
       const handle: InternalHandle = {
         [HandleTypeId]: cardinality,
         name,
-        builderId,
+        identity,
         familyId: families.length,
         key: options.key,
         owner: options.owner,
@@ -67,7 +73,7 @@ export const define = <H extends Record<string, AnyHandle>>(
     many: makeHandle("many") as DefineApi["many"]
   })
 
-  const source: DefinitionSource = { builderId, families }
+  const source: DefinitionSource = { identity, families }
 
   const bind = <State>(
     bf: (bind: BindApi<State>) => Record<string, BindingEntry<State>>
@@ -91,6 +97,18 @@ export const define = <H extends Record<string, AnyHandle>>(
 }
 
 /**
+ * A semantic reference to one keyed lifetime: the family handle, its key, and
+ * the reference of its owner (`null` for a root family). The ownership chain
+ * is type-checked, so a reference cannot name a lifetime the Definition could
+ * not produce.
+ */
+export const ref = <H extends AnyHandle>(
+  family: H,
+  key: KeyOf<H>,
+  parent: OwnerOf<H>
+): LifetimeRef<H> => ({ family, key, parent })
+
+/**
  * The stable mutation boundary of a running Reconciler.
  *
  * `commit(state)` evaluates the Binding against `state` and atomically
@@ -102,12 +120,21 @@ export const define = <H extends Record<string, AnyHandle>>(
  * subscription is owned by the surrounding Scope and only receives failures
  * published while it is attached.
  *
+ * `status` answers authoritatively what the runtime currently knows about one
+ * semantic lifetime; unlike a failure notification it cannot be missed.
+ *
+ * `retry(ref)` retires a Failed generation so a fresh one may be admitted
+ * under the same semantic key, without the application inventing a retry
+ * nonce or withdrawing and restoring desire.
+ *
  * `shutdown` is idempotent: it stops accepting commits, invalidates all
  * desire, closes the root Scope and awaits structured finalization.
  */
 export interface Controller<in State> {
   readonly commit: (state: State) => Effect.Effect<void, CommitError>
   readonly failures: Effect.Effect<PubSub.Subscription<LifetimeFailure>, never, Scope.Scope>
+  readonly status: (ref: LifetimeRef) => Effect.Effect<LifetimeStatus>
+  readonly retry: (ref: LifetimeRef) => Effect.Effect<void, ControllerClosed>
   readonly shutdown: Effect.Effect<void>
 }
 

@@ -1,6 +1,8 @@
 import { Data, Effect } from "effect"
 import { TestHooksId, type TestHooks } from "../src/internal/controller.js"
+import type { LifetimeRef } from "../src/LifetimeRef.js"
 import type * as Reconciler from "../src/Reconciler.js"
+import type { LifetimeStatus } from "../src/Status.js"
 
 /**
  * The controller's test-only bookkeeping hooks. They are attached to the
@@ -53,6 +55,29 @@ export const eventually = (
  * an event while a lifetime is deliberately wedged, or after shutdown has
  * stopped the reconcile loop, where no convergence barrier can exist.
  */
+/** Poll `controller.status(ref)` until it reports `tag`. */
+export const awaitStatus = <State>(
+  controller: Reconciler.Controller<State>,
+  ref: LifetimeRef,
+  tag: LifetimeStatus["_tag"]
+): Effect.Effect<void, TestTimeout> => {
+  const loop: Effect.Effect<void> = Effect.gen(function* () {
+    const status = yield* controller.status(ref)
+    if (status._tag === tag) return
+    yield* Effect.sleep(2)
+    yield* loop
+  })
+  return loop.pipe(
+    Effect.timeoutOrElse({
+      duration: 5000,
+      orElse: () =>
+        Effect.fail(
+          new TestTimeout({ message: `status of ${String(ref.key)} never became ${tag}` })
+        )
+    })
+  )
+}
+
 export const quietFor = (millis = 60): Effect.Effect<void> => Effect.sleep(millis)
 
 export const count = (log: ReadonlyArray<string>, entry: string): number =>

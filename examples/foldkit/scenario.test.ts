@@ -64,6 +64,45 @@ describe("workspace diagnostics", () => {
           expect(control.liveAnalyzers()).toEqual([])
         }))
 
+      it.live("§5 — the user retries a failed connection under the same key", () =>
+        Effect.gen(function* () {
+          const { control, service } = yield* makeBackend
+          const app = yield* subject.start(service, control)
+
+          yield* app.signIn("alice")
+          yield* app.openWorkspace("acme")
+          yield* app.openDocument("a.ts")
+          yield* app.changeLanguage(unsupportedLanguage)
+          expect(app.serverUnavailable()).toBe(true)
+
+          // Retrying while the environment is still broken fails again, and
+          // the failure is reported afresh rather than going quiet.
+          yield* app.pressRetry
+          expect(app.serverUnavailable()).toBe(true)
+          expect(control.liveServers()).toEqual([])
+          expect(
+            control.events.filter((event) => event.startsWith("server:failed:"))
+          ).toHaveLength(2)
+
+          // The user fixes the environment and presses Retry: the desired
+          // state never changed, so the same language starts this time.
+          yield* control.fixLanguage(unsupportedLanguage)
+          yield* app.pressRetry
+
+          expect(app.serverUnavailable()).toBe(false)
+          expect(control.liveServers()).toHaveLength(1)
+          // ...and the dependents that were waiting on it start.
+          expect(control.liveAnalyzers()).toHaveLength(1)
+          expect(
+            control.events.filter((event) => event.startsWith("server:open:")).at(-1)
+          ).toContain(unsupportedLanguage)
+
+          // A stale failure cannot win afterwards: the banner stays clear.
+          yield* app.openDocument("b.ts")
+          expect(app.serverUnavailable()).toBe(false)
+          expect(control.liveAnalyzers()).toHaveLength(2)
+        }))
+
       it.live("surfaces a language server that cannot start", () =>
         Effect.gen(function* () {
           const { control, service } = yield* makeBackend

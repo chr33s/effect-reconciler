@@ -1,6 +1,10 @@
 # effect-reconciler
 
-## Runtime Specification v0.7
+## Runtime Specification v0.8
+
+> v0.8 adds §92–§96: semantic lifetime references, same-key retry, failed-slot
+> semantics, the failure observation contract and Definition identity. Each was
+> implemented and tested before being written down, per `docs/spec.2.md` §13.
 
 ## 1. Thesis
 
@@ -1269,7 +1273,8 @@ partial resources finalize
 failure becomes inspectable
 ```
 
-A future retry creates another physical instance.
+A future retry creates another physical instance — explicitly, through
+`Controller.retry` (§93), never by recommitting the same state.
 
 Advanced supervision policies are deferred.
 
@@ -2446,8 +2451,13 @@ Replacement.sequential
 Replacement.overlap
 
 Reconciler.make
+Reconciler.ref
 
 Controller.commit
+
+Controller.failures
+Controller.status
+Controller.retry
 
 Controller.snapshot
 
@@ -2466,6 +2476,10 @@ ManyHandle
 
 Key<A>
 ReplacementPolicy
+
+LifetimeRef
+LifetimeFailure
+LifetimeStatus
 
 ReconcilerSnapshot
 LifetimeSnapshot
@@ -2790,6 +2804,139 @@ More compactly:
 The product thesis is:
 
 > **Define dynamic Effect architecture once; bind it to application state; let `effect-reconciler` own the races.**
+
+---
+
+## 92. Semantic lifetime reference
+
+Every semantic API speaks one vocabulary: a reference naming
+
+```text
+family handle
++
+semantic key
++
+semantic owner path
+```
+
+The family handle — not its label — is the identity. Two families may share a
+display name, so a name-keyed API could not distinguish them.
+
+```ts
+interface LifetimeRef<H> {
+  readonly family: H
+  readonly key: KeyOf<H>
+  readonly parent: OwnerOf<H> // a LifetimeRef, or null at the root
+}
+```
+
+The ownership chain is type-checked, so a reference cannot name a lifetime the
+Definition could not produce. References are built with `Reconciler.ref`, and
+arrive with every failure. Owned selectors receive their owner as one, which is
+what lets a selector distinguish two identical direct owner keys under
+different ancestors.
+
+A reference never exposes:
+
+```text
+Scope
+Fiber
+Context
+physical generation
+reconcile revision
+live slot or instance
+```
+
+---
+
+## 93. Same-key retry
+
+A failed lifetime keeps its slot until desire changes, which is what makes
+recommitting the same state lifecycle-idempotent. Recommitting therefore cannot
+serve as an implicit retry, and the alternatives — a retry nonce inside the
+semantic key, withdrawing and restoring desire, an unrelated domain-state
+change — would all pollute domain identity with operational generation state.
+
+```ts
+controller.retry(ref)
+```
+
+> If the referenced lifetime is still desired and its current physical
+> generation is Failed, retire that generation and allow a fresh one to be
+> admitted when owner and provider conditions permit.
+
+Retry never changes semantic identity: the key, the owner path and therefore
+every descendant's identity are exactly what the Binding already described.
+
+| situation | behaviour |
+| :--- | :--- |
+| current generation Failed | retire it; a fresh generation is admitted when conditions permit |
+| Starting / Running / Stopping | no-op |
+| no longer desired | no-op |
+| controller closed | fails with `ControllerClosed` |
+| provider unavailable | stays unadmitted until the provider is Running |
+| sequential cleanup in flight | waits for the failed generation's finalization boundary |
+| called repeatedly | idempotent: one retirement, not one per call |
+
+---
+
+## 94. Failed-slot semantics
+
+A generation whose startup failed is not discarded: it holds its slot, in the
+`Failed` state, with its cause. That is what stops the runtime from spinning on
+a failing resource, and what makes "still broken" observable rather than
+indistinguishable from "not started yet".
+
+The slot is released when either
+
+```text
+desire changes
+or
+Controller.retry retires the generation
+```
+
+Under `Replacement.sequential`, the replacement waits for the failed
+generation's finalization boundary, so a partially acquired exclusive resource
+is fully released before another attempt acquires it.
+
+---
+
+## 95. Failure observation: event versus status
+
+Two mechanisms, deliberately different in strength.
+
+`Controller.status(ref)` is authoritative and cannot be missed:
+
+```text
+NotDesired | Pending | Starting | Running | Failed(cause) | Stopping
+```
+
+`Controller.failures` is a live convenience: a Scope-owned subscription to
+failures of lifetimes whose desire is still current.
+
+Its delivery contract is explicit:
+
+- a failure is published only if the semantic desire is still current at the
+  moment startup completes — desire withdrawn during startup means no event;
+- a superseded generation's failure is never published;
+- with no subscriber attached, nothing is retained;
+- the buffer is bounded and drops the oldest events under overflow;
+- publication never blocks reconciliation.
+
+Therefore:
+
+> If application state depends on a failure, that state must be recoverable
+> from `status`. Notifications are for reacting, not for remembering.
+
+---
+
+## 96. Definition identity
+
+A Definition's identity is a per-call object, compared by reference; a family's
+identity is its handle object. Neither is a name nor a numeric index, so
+handles cannot be confused across Definitions that declare families in the same
+order, nor across two duplicate installed copies of the package. Numeric family
+ids remain, but only as indexes within one Definition.
 
 ---
 

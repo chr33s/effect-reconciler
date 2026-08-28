@@ -65,6 +65,8 @@ export interface BackendControl {
   readonly resumeAnalyzers: Effect.Effect<void>
   /** Push a diagnostic as a real server would. */
   readonly emit: (diagnostic: Diagnostic) => Effect.Effect<void>
+  /** Fix the environment: a language that had no server now has one. */
+  readonly fixLanguage: (language: string) => Effect.Effect<void>
 }
 
 /** A language that no server supports, used to exercise startup failure. */
@@ -77,6 +79,7 @@ export const makeBackend = Effect.gen(function* () {
   const diagnostics = yield* PubSub.unbounded<Diagnostic>()
   let nextServer = 1
   let nextAnalyzer = 1
+  const unsupported = new Set<string>([unsupportedLanguage])
   let serverGate: Deferred.Deferred<void> | null = null
   let analyzerGate: Deferred.Deferred<void> | null = null
 
@@ -85,7 +88,7 @@ export const makeBackend = Effect.gen(function* () {
       Effect.gen(function* () {
         const pending = serverGate
         if (pending !== null) yield* Deferred.await(pending)
-        if (language === unsupportedLanguage) {
+        if (unsupported.has(language)) {
           events.push(`server:failed:${language}`)
           return yield* new LanguageServerUnavailable({ language })
         }
@@ -136,7 +139,11 @@ export const makeBackend = Effect.gen(function* () {
       analyzerGate = null
       if (pending !== null) yield* Deferred.succeed(pending, void 0)
     }),
-    emit: (diagnostic) => Effect.asVoid(PubSub.publish(diagnostics, diagnostic))
+    emit: (diagnostic) => Effect.asVoid(PubSub.publish(diagnostics, diagnostic)),
+    fixLanguage: (language) =>
+      Effect.sync(() => {
+        unsupported.delete(language)
+      })
   }
 
   return { service, control } as const

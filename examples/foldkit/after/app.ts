@@ -57,12 +57,25 @@ export const Message = FoldkitMessage.defineMessageUnion({
   OpenedDocument: { uri: S.String },
   ClosedDocument: { uri: S.String },
   ReceivedDiagnostic: { uri: S.String, message: S.String },
+  PressedRetry: {},
   /** @integration A lifetime the Model asked for could not start. */
-  LifetimeFailed: { family: S.String }
+  LifetimeFailed: { family: S.String },
+  /** @integration The runtime was asked to retry the failed connection. */
+  RetryStarted: {}
 })
 export type Message = typeof Message.Type
 
-export const update = (model: Model, message: Message): Update.Return<Model, Message> =>
+/**
+ * @integration The one effectful thing this application asks the runtime to
+ * do beyond committing: retry the failed connection under the key the Model
+ * already describes.
+ */
+export interface Retry {
+  readonly server: (model: Model) => Update.Commands<Message>
+}
+
+export const makeUpdate = (retry: Retry) =>
+(model: Model, message: Message): Update.Return<Model, Message> =>
   Message.match(message, {
     SignedIn: ({ user }) => ({ model: { ...model, user: Option.some(user) } }),
     SignedOut: () => ({
@@ -96,7 +109,11 @@ export const update = (model: Model, message: Message): Update.Return<Model, Mes
     }),
     LifetimeFailed: ({ family }) => ({
       model: { ...model, serverUnavailable: family === "Server" }
-    })
+    }),
+    // The user asks for another attempt: no nonce, no withdrawn desire, no
+    // change to the Model's description of what should exist.
+    PressedRetry: () => ({ model, commands: retry.server(model) }),
+    RetryStarted: () => ({ model: { ...model, serverUnavailable: false } })
   })
 
 // -----------------------------------------------------------------------------
@@ -203,9 +220,35 @@ export const start = (backend: BackendApi) =>
       // runtime condition the application can act on.
       Effect.orDie
     )
+    // The semantic reference of the connection the Model currently describes.
+    // Pure: it names a lifetime, it does not reach into the runtime.
+    const serverRef = (model: Model) =>
+      Option.flatMap(model.user, (user) =>
+        Option.map(model.workspace, (workspace) =>
+          Reconciler.ref(
+            Editor.Server,
+            model.language,
+            Reconciler.ref(Editor.Workspace, workspace, Reconciler.ref(Editor.Session, user, null))
+          )
+        )
+      )
+
     const session = yield* Driver.start<Model, Message, never>({
       init,
-      update,
+      update: makeUpdate({
+        server: (model) =>
+          Option.match(serverRef(model), {
+            onNone: () => [],
+            onSome: (ref) => [
+              {
+                name: "RetryServer",
+                effect: Effect.as(controller.retry(ref), Message.RetryStarted()).pipe(
+                  Effect.orElseSucceed(() => Message.RetryStarted())
+                )
+              }
+            ]
+          })
+      }),
       onCommitted: (model) => Effect.ignore(controller.commit(model))
     })
     dispatch = session.dispatch
@@ -214,7 +257,7 @@ export const start = (backend: BackendApi) =>
     yield* Effect.forkScoped(
       Effect.forever(
         Effect.flatMap(PubSub.take(failures), (failure) =>
-          session.dispatch(Message.LifetimeFailed({ family: failure.family }))
+          session.dispatch(Message.LifetimeFailed({ family: failure.lifetime.family.name }))
         )
       )
     )

@@ -76,17 +76,25 @@ const Diagnostics = define.one("Diagnostics", {
 })
 ```
 
-A control plane can observe the startup failures of lifetimes whose desire is
-still current, so it can surface them in its own model without learning
-anything about physical generations:
+Every semantic API speaks one vocabulary — a `LifetimeRef`: the family handle,
+its key, and its owner path. Failures arrive as one, `status` and `retry` take
+one:
 
 ```ts
 const failures = yield* controller.failures // subscription owned by this Scope
 const failure = yield* PubSub.take(failures)
-failure.family // "Language"
-failure.key // "typescript"
-failure.owner?.key // the Session key it failed beneath
+failure.lifetime.family.name // "Server"
+failure.lifetime.key // "typescript"
+failure.lifetime.parent?.key // the Workspace it failed beneath
 failure.cause // why startup failed
+
+// Status is authoritative; notifications are a live convenience that may be
+// missed, so state that depends on failure stays discoverable.
+const state = yield* controller.status(failure.lifetime) // Failed(cause)
+
+// The environment gets fixed: retry the same semantic key. No retry nonce in
+// the model, no withdrawing and restoring desire.
+yield* controller.retry(failure.lifetime)
 ```
 
 Startup environments are typed. Whatever a `start` Effect needs beyond its own
@@ -98,6 +106,9 @@ capabilities is a root-environment requirement, and surfaces on
 // Res.start yields SettingsService, which no ancestor or provider publishes.
 const controller = Reconciler.make(Bound) // Effect<..., Scope | SettingsService>
 ```
+
+Design decisions and their evidence are in
+[`docs/decisions.md`](docs/decisions.md).
 
 See [`examples/editor.ts`](examples/editor.ts) for the full editor topology
 from the spec, bound to two different control planes, and
@@ -122,6 +133,8 @@ measured.
 - shutdown is idempotent, interrupts startups, awaits structured
   finalization; commits after shutdown fail with `ControllerClosed`
 - one Definition binds to multiple state types
+- a failed lifetime holds its slot, so recommitting the same state is not an
+  implicit retry; `retry` retires the failed generation under the same key
 - owned selectors see the whole semantic owner path, so identical direct-owner
   keys under different ancestors stay distinct
 - `Key.struct` composition stays injective under adversarial component

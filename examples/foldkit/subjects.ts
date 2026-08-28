@@ -18,6 +18,8 @@ export interface Actions {
   readonly changeSettings: (revision: number) => Effect.Effect<void>
   readonly openDocument: (uri: string) => Effect.Effect<void>
   readonly closeDocument: (uri: string) => Effect.Effect<void>
+  /** The user presses "Retry" on the unavailable-server banner. */
+  readonly pressRetry: Effect.Effect<void>
   /** Dispatch without waiting for the application to settle. */
   readonly fire: {
     readonly changeLanguage: (language: string) => Effect.Effect<void>
@@ -55,6 +57,7 @@ interface Constructors<Message> {
   readonly ChangedSettings: (fields: { readonly revision: number }) => Message
   readonly OpenedDocument: (fields: { readonly uri: string }) => Message
   readonly ClosedDocument: (fields: { readonly uri: string }) => Message
+  readonly PressedRetry: () => Message
 }
 
 /**
@@ -89,6 +92,7 @@ const actions = <Message>(
     changeSettings: (revision) => send(Message.ChangedSettings({ revision })),
     openDocument: (uri) => send(Message.OpenedDocument({ uri })),
     closeDocument: (uri) => send(Message.ClosedDocument({ uri })),
+    pressRetry: send(Message.PressedRetry()),
     fire: {
       changeLanguage: (language) => fire(Message.ChangedLanguage({ language })),
       changeSettings: (revision) => fire(Message.ChangedSettings({ revision })),

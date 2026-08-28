@@ -55,12 +55,23 @@ const region = (source, name) => {
   return sloc(collected.join("\n"))
 }
 
-/** Fields of the exported `Model` interface, split by marker. */
+/**
+ * Fields of the exported `Model` interface, split by marker. A marker counts
+ * whether it sits on the field line or in the comment above it.
+ */
 const modelFields = (source) => {
   const block = between(source, "export interface Model {", "\n}")
-  const fields = block.split("\n").filter((line) => line.includes("readonly "))
-  const lifecycle = fields.filter((line) => line.includes("@lifecycle"))
-  return { total: fields.length, lifecycle: lifecycle.length }
+  let total = 0
+  let lifecycle = 0
+  let carried = false
+  for (const line of block.split("\n")) {
+    if (line.includes("@lifecycle")) carried = true
+    if (!line.includes("readonly ")) continue
+    total++
+    if (carried) lifecycle++
+    carried = false
+  }
+  return { total, lifecycle }
 }
 
 /** Variants of the Message union, split by marker. */
@@ -108,6 +119,7 @@ const rows = [
   ["Message variants, lifecycle-only", beforeMessages.lifecycle, afterMessages.lifecycle],
   ["Lifecycle-marked lines", countMatches(before, /@lifecycle/g), countMatches(after, /@lifecycle/g)],
   ["Manual provider invalidation sites", countMatches(before, /Manual provider invalidation/g), 0],
+  ["Retry nonce fields in the Model", countMatches(before, /serverAttempt:/g) > 0 ? 1 : 0, 0],
   ["Commands (lifecycle)", countMatches(before, /name: "(Start|Stop)Analyzer"/g), 0],
   ["Domain branches running the supervisor", supervisorCallSites, 0],
   ["Coordination SLOC", beforeCoordination, afterCoordination],
