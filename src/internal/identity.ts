@@ -55,4 +55,16 @@ export class Ident implements Equal.Equal {
  * key-independent: `Session` under one owner has a single slot no matter which
  * user is desired. A symbol can never equal a user key value.
  */
-export const oneSlot: unique symbol = Symbol.for("effect-reconciler/oneSlot")
+const oneSlot: unique symbol = Symbol.for("effect-reconciler/oneSlot")
+
+/**
+ * The identity of the replacement slot an instance competes for. A `one`
+ * family has a single key-independent slot per owner; a `many` family's slot
+ * is its own identity. The one place this rule is written: desire evaluation
+ * and `Controller.status` both ask here.
+ */
+export const slotIdent = (
+  familyId: number,
+  cardinality: "one" | "many",
+  ident: Ident
+): Ident => (cardinality === "one" ? new Ident(familyId, oneSlot, ident.parent) : ident)

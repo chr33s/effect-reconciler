@@ -1,6 +1,6 @@
 /**
  * Scale behaviour of the reconciler, measured before any incremental
- * optimization exists (spec plan §71–73, docs/spec.1.md Phase 6).
+ * optimization exists (docs/spec.md §15).
  *
  * The topology is the editor from the specification, so a commit touches a
  * capability DAG rather than a flat resource list:

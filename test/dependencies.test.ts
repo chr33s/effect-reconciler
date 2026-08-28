@@ -115,7 +115,7 @@ describe("capability dependencies", () => {
       expect(log.filter((e) => e.startsWith("probe:"))).toEqual(["probe:s2"])
     }))
 
-  it.live("§25 — ambiguous providers are rejected at creation", () =>
+  it.live("§3.4 — ambiguous providers are rejected at creation", () =>
     Effect.gen(function* () {
       const Def = Reconciler.define((define) => {
         const Provider = define.many("Provider", {

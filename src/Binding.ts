@@ -10,11 +10,19 @@ import type { AnyHandle, DefinitionSource, ManyHandle, OneHandle } from "./Defin
  * runtime state, or inspect live physical generations.
  */
 export interface BindingEntry<in State> {
-  /** The key this selector had in the Binding record, for diagnostics. */
-  readonly label: string
   readonly handle: AnyHandle
   readonly cardinality: "one" | "many"
   readonly selector: (state: State, owner: unknown) => unknown
+}
+
+/**
+ * A bound selector together with the name the application wrote it under in
+ * the Binding record — the only name a foreign handle can be reported by.
+ * The label belongs to the record, not to the entry, so it is attached where
+ * the record is walked rather than left blank at construction.
+ */
+export interface LabeledEntry<in State> extends BindingEntry<State> {
+  readonly label: string
 }
 
 export interface BindApi<in out State> {
@@ -35,10 +43,10 @@ export interface BindApi<in out State> {
  * Definition. The same Definition may be bound to any number of state types.
  *
  * `RootR` collects what the Definition's startup Effects require from the root
- * environment (§60); `Reconciler.make` asks the caller for exactly those.
+ * environment (spec §6.2); `Reconciler.make` asks the caller for exactly those.
  */
 export interface Binding<in State, out RootR = never> {
   readonly source: DefinitionSource
-  readonly entries: ReadonlyArray<BindingEntry<State>>
+  readonly entries: ReadonlyArray<LabeledEntry<State>>
   readonly _rootRequires?: RootR
 }

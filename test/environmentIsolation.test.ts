@@ -60,7 +60,7 @@ describe("environment isolation", () => {
       ])
     }))
 
-  it.live("§60 — root environment services reach every startup Effect", () =>
+  it.live("§6.2 — root environment services reach every startup Effect", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => ({
@@ -87,7 +87,7 @@ describe("environment isolation", () => {
       }).pipe(Effect.provideService(SettingsService, { revision: 7 }))
     }))
 
-  it.live("§28 — a dependent captures one internally consistent provider set at admission", () =>
+  it.live("§6.3 — a dependent captures one internally consistent provider set at admission", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => {

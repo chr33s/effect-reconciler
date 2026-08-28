@@ -1,6 +1,6 @@
 /**
  * The reconciler decides what should exist; Effect decides how it runs
- * (spec.3 §29, §43, §44).
+ * (spec §6.2, §6.3, §12.2).
  *
  * These two tests exist to keep that boundary honest. Transient retry inside a
  * startup is `Effect.retry` with a `Schedule` and stays one physical
@@ -17,7 +17,7 @@ class Connection extends Context.Service<Connection, {
 }>()("test/Connection") {}
 
 describe("effect-native startup", () => {
-  it.live("§43 — transient retry inside startup is one generation", () =>
+  it.live("§6.2 — transient retry inside startup is one generation", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       let attempts = 0
@@ -54,7 +54,7 @@ describe("effect-native startup", () => {
       expect(log.filter((entry) => entry === "release")).toEqual([])
     }))
 
-  it.live("§44 — a lifetime may build a Layer in its own Scope", () =>
+  it.live("§12.2 — a lifetime may build a Layer in its own Scope", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
 

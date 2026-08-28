@@ -1,6 +1,6 @@
 import * as Result from "effect/Result"
 import type * as Effect from "effect/Effect"
-import type { BindingEntry } from "../Binding.js"
+import type { LabeledEntry } from "../Binding.js"
 import type { Binding } from "../Binding.js"
 import {
   asInternal,
@@ -74,17 +74,18 @@ export const compileDefinition = (
 ): Result.Result<Compiled, DefinitionError> => {
   const families: Array<CompiledFamily> = []
   for (const handle of source.families) {
+    // The same object under its public type: the internal shape is what this
+    // function reads, the public handle is what errors and `Compiled` carry.
+    const family = handle as unknown as AnyHandle
     let ownerId: number | null = null
     let chain: Array<number>
     if (handle.owner !== undefined) {
       if (!isHandle(handle.owner) || asInternal(handle.owner).identity !== source.identity) {
-        return Result.fail(
-          new ForeignOwner({ family: handle as unknown as AnyHandle })
-        )
+        return Result.fail(new ForeignOwner({ family }))
       }
       const owner = asInternal(handle.owner)
       if (owner.familyId >= handle.familyId) {
-        return Result.fail(new OwnershipCycle({ family: handle as unknown as AnyHandle }))
+        return Result.fail(new OwnershipCycle({ family }))
       }
       ownerId = owner.familyId
       chain = [...families[ownerId]!.chain, handle.familyId]
@@ -96,27 +97,17 @@ export const compileDefinition = (
     const requires: Array<CompiledRequirement> = []
     for (const [name, requirement] of Object.entries(handle.requires)) {
       if (!isHandle(requirement) || asInternal(requirement).identity !== source.identity) {
-        return Result.fail(
-          new ForeignRequirement({ family: handle as unknown as AnyHandle, requirement: name })
-        )
+        return Result.fail(new ForeignRequirement({ family, requirement: name }))
       }
       const provider = asInternal(requirement)
       if (provider.familyId === handle.familyId) {
         return Result.fail(
-          new CapabilityCycle({
-            family: handle as unknown as AnyHandle,
-            requirement: name,
-            provider: handle as unknown as AnyHandle
-          })
+          new CapabilityCycle({ family, requirement: name, provider: family })
         )
       }
       if (provider.familyId > handle.familyId) {
         return Result.fail(
-          new CapabilityCycle({
-            family: handle as unknown as AnyHandle,
-            requirement: name,
-            provider: requirement as AnyHandle
-          })
+          new CapabilityCycle({ family, requirement: name, provider: requirement as AnyHandle })
         )
       }
       const providerFamily = families[provider.familyId]!
@@ -133,7 +124,7 @@ export const compileDefinition = (
         if (!isPrefix(providerOwnerChain, ownerChain)) {
           return Result.fail(
             new UnresolvableProvider({
-              family: handle as unknown as AnyHandle,
+              family,
               requirement: name,
               provider: providerFamily.handle
             })
@@ -142,7 +133,7 @@ export const compileDefinition = (
         if (providerFamily.cardinality !== "one") {
           return Result.fail(
             new AmbiguousProvider({
-              family: handle as unknown as AnyHandle,
+              family,
               requirement: name,
               provider: providerFamily.handle
             })
@@ -160,7 +151,7 @@ export const compileDefinition = (
     families.push({
       id: handle.familyId,
       name: handle.name,
-      handle: handle as unknown as AnyHandle,
+      handle: family,
       cardinality: handle[HandleTypeId],
       ownerId,
       chain,
@@ -175,8 +166,8 @@ export const compileDefinition = (
 export const compileBinding = <State>(
   compiled: Compiled,
   binding: Binding<State, any>
-): Result.Result<ReadonlyMap<number, BindingEntry<State>>, BindingError> => {
-  const entries = new Map<number, BindingEntry<State>>()
+): Result.Result<ReadonlyMap<number, LabeledEntry<State>>, BindingError> => {
+  const entries = new Map<number, LabeledEntry<State>>()
   for (const entry of binding.entries) {
     if (!isHandle(entry.handle) || asInternal(entry.handle).identity !== binding.source.identity) {
       return Result.fail(new ForeignHandle({ label: entry.label }))

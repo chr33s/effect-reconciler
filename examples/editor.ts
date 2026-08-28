@@ -1,5 +1,5 @@
 /**
- * The editor topology from the specification (§11, §85, §86): one Definition,
+ * The editor topology from the specification (§4.5): one Definition,
  * bound to two different control-state types.
  */
 import { Context, Effect, Option } from "effect"
@@ -76,7 +76,7 @@ export const Editor = Reconciler.define((define) => {
   return { Settings, Session, Workspace, Language, Document, Diagnostics }
 })
 
-// --- Foldkit-style Model binding (§85) ---------------------------------------
+// --- Foldkit-style Model binding (§4.5) --------------------------------------
 
 interface Model {
   readonly session: Option.Option<{ readonly userId: string }>
@@ -97,7 +97,7 @@ export const FoldkitEditor = Editor.bind<Model>((bind) => ({
   diagnostics: bind.one(Editor.Diagnostics, () => Option.some(null))
 }))
 
-// --- Same Definition, different control plane (§86) --------------------------
+// --- Same Definition, different control plane (§4.4) -------------------------
 
 interface DaemonConfig {
   readonly account: Option.Option<string>

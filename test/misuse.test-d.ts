@@ -93,7 +93,7 @@ const Unannotated = Reconciler.define((define) => ({
 }))
 
 // -----------------------------------------------------------------------------
-// Startup environments (§28, §29, §60)
+// Startup environments (§6.2, §6.3)
 // -----------------------------------------------------------------------------
 
 class SettingsService extends Context.Service<
@@ -141,7 +141,7 @@ Effect.runPromise(
 )
 
 // A capability that is neither published by an ancestor nor named in
-// `requires` is a root-environment requirement of the Controller (§60).
+// `requires` is a root-environment requirement of the Controller (§6.2).
 const Unmet = Reconciler.define((define) => {
   const Settings = define.one("Settings", {
     start: (revision: number) => Effect.succeed(Context.make(SettingsService, { revision }))
@@ -175,7 +175,7 @@ Effect.runPromise(
 )
 
 // -----------------------------------------------------------------------------
-// Key inference (spec.3 §8, §45)
+// Key inference (§3.2)
 // -----------------------------------------------------------------------------
 
 class WorkspaceKey extends Data.Class<{

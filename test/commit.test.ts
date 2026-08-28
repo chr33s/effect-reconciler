@@ -4,7 +4,7 @@ import * as Reconciler from "../src/Reconciler.js"
 import { eventually, holding, idle, TestTimeout } from "./util.js"
 
 describe("commit", () => {
-  it.live("9.11/§51 — commit does not await startup, and returns once desire is published", () =>
+  it.live("§8.3 — commit does not await startup, and returns once desire is published", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       const never = yield* Deferred.make<void>()
@@ -34,7 +34,7 @@ describe("commit", () => {
       yield* eventually(() => log.includes("begin:a"), "startup began asynchronously")
     }))
 
-  it.live("9.11/§47 — a failed commit publishes nothing; the previous desire stays authoritative", () =>
+  it.live("§8.2 — a failed commit publishes nothing; the previous desire stays authoritative", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => ({
@@ -113,7 +113,7 @@ describe("commit", () => {
       expect(log).not.toContain("stop:final")
     }))
 
-  it.live("§1.3 — interruption before the publication point publishes nothing", () =>
+  it.live("§8.2 — interruption before the publication point publishes nothing", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => ({
@@ -153,7 +153,7 @@ describe("commit", () => {
       expect(log).toEqual(["start:a"])
     }))
 
-  it.live("§1.3 — a commit that returns has definitely published, exactly once", () =>
+  it.live("§8.2 — a commit that returns has definitely published, exactly once", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => ({
@@ -179,7 +179,7 @@ describe("commit", () => {
       expect(log).toEqual(["start:a"])
     }))
 
-  it.live("§1.3 — an interrupted commit never wedges the publication point", () =>
+  it.live("§8.2 — an interrupted commit never wedges the publication point", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => ({
@@ -215,7 +215,7 @@ describe("commit", () => {
       expect(log[log.length - 1]).toBe("start:final")
     }))
 
-  it.live("9.11/§50 — an interrupt at an uncontrolled point never publishes half a snapshot", () =>
+  it.live("§8.2 — an interrupt at an uncontrolled point never publishes half a snapshot", () =>
     Effect.gen(function* () {
       // Where the interrupt lands relative to the publication point is not
       // controlled here — that is what the three tests above pin down. What

@@ -1,6 +1,6 @@
 # Workspace diagnostics — a Foldkit feature, twice
 
-This is the experiment `docs/spec.1.md` Phases 4 and 5 call for: one non-trivial
+This is the experiment `docs/spec.md` §16.2 calls for: one non-trivial
 [Foldkit](https://github.com/foldkit/foldkit) feature implemented **with** and
 **without** `effect-reconciler`, running against the same backend, checked by
 the same tests, and measured on how much application coordination each one
@@ -36,7 +36,7 @@ It was chosen because it carries every trait Phase 4 asks for:
 | provider-dependent resources | analyzers capture a server generation *and* a settings revision |
 | rapid key churn | documents open and close faster than analyzers start |
 | startup failure | `cobol` has no server; the UI must say so |
-| user-visible retry | the user fixes the environment and presses Retry (spec.2 §5) |
+| user-visible retry | the user fixes the environment and presses Retry (spec §9.3) |
 | child resource lifetimes | one analyzer per open document, owned by the connection |
 
 ## The two versions
@@ -78,7 +78,7 @@ Both versions pass identically — the migration preserved behaviour.
 4. the latest desired language wins after rapid changes
 5. a document reopened during cleanup never runs two analyzers
 
-`scenario.test.ts` also runs the release-gating retry story from `spec.2` §5
+`scenario.test.ts` also runs the release-gating retry story from `docs/spec.md` §9.3
 against both: an unsupported language fails, the user retries while it is
 still broken and gets a fresh failure, the environment is fixed, and one more
 press brings up the server and everything that was waiting on it.
@@ -139,7 +139,7 @@ Reading the rows against the Phase 5 categories:
   62-line Definition and Binding, plus 46 lines of integration wiring that any
   app pays once regardless of how many families it declares.
 
-The 30–50% target in `docs/spec.1.md` §14 is met on lifecycle-specific code
+The 30–50% target in `docs/spec.md` §16.3 is met on lifecycle-specific code
 (−57%), while the whole feature shrinks by a more modest 19% — the domain half
 of the app is untouched, which is what should happen. Integration is 46 lines,
 most of it the retry flow's semantic reference built from the Model; that is a

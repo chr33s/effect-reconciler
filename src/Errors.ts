@@ -34,7 +34,7 @@ export class ForeignRequirement extends Data.TaggedError("ForeignRequirement")<{
 export class CapabilityCycle extends Data.TaggedError("CapabilityCycle")<{
   readonly family: AnyHandle
   readonly requirement: string
-  readonly provider: AnyHandle | null
+  readonly provider: AnyHandle
 }> {}
 
 /** The provider family has `many` cardinality, so "which one" has no answer. */
@@ -131,3 +131,20 @@ export class InvalidDesiredState extends Data.TaggedError("InvalidDesiredState")
 }> {}
 
 export type CommitError = ControllerClosed | InvalidDesiredState
+
+// -----------------------------------------------------------------------------
+// Defects — programming errors, raised rather than returned
+// -----------------------------------------------------------------------------
+
+/**
+ * A `LifetimeRef` handed to `status` or `retry` names a family from a different
+ * Definition, so it cannot name anything in this Controller.
+ *
+ * This is raised as a *defect*, not returned in an error channel: no Controller
+ * can act on it and no caller can recover from it. It is tagged data rather
+ * than a bare `Error` so that a test — or a defect handler — can identify it
+ * without matching on a message string.
+ */
+export class ForeignLifetimeRef extends Data.TaggedError("ForeignLifetimeRef")<{
+  readonly family: unknown
+}> {}

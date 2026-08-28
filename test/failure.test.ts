@@ -47,7 +47,7 @@ describe("startup failure", () => {
       yield* eventually(() => log.includes("diagnostics:good"), "dependent admitted")
     }))
 
-  it.live("§1.2 — a failed lifetime is observable semantically, with no internals", () =>
+  it.live("§9.1 — a failed lifetime is observable semantically, with no internals", () =>
     Effect.gen(function* () {
       const Def = Reconciler.define((define) => {
         const Session = define.one("Session", {
@@ -90,7 +90,7 @@ describe("startup failure", () => {
       expect(yield* drainFailures(failures)).toEqual([])
     }))
 
-  it.live("§38 — startup failure finalizes partial resources and admits no children", () =>
+  it.live("§6.6 — startup failure finalizes partial resources and admits no children", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => {

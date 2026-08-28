@@ -1,7 +1,6 @@
 # Migrating an existing Foldkit app
 
-This is the migration `docs/spec.2.md` §4 and `docs/spec.3.md` §52 Phase F ask
-for: a feature that **existed before `effect-reconciler` did**, moved onto it,
+This is the migration `docs/spec.md` §16.2 asks for: a feature that **existed before `effect-reconciler` did**, moved onto it,
 measured, and reported including the parts that did not pay off.
 
 ```sh
@@ -32,7 +31,7 @@ Foldkit runtime's Message loop, Commands and Managed Resources.
 One compute engine, built from a `Layer`, that exists only while the user wants
 it. `Compute` squares a counter using the engine, and skips when there is none.
 It is a **single flat resource**: no ownership, no capability dependencies, no
-keyed children, no churn. `docs/spec.1.md` §4 explicitly warns against
+keyed children, no churn. `docs/spec.md` §16.2 explicitly warns against
 validating on exactly this shape — which is why it is worth doing.
 
 ## What the tests show
@@ -88,7 +87,7 @@ after a failure re-acquired the engine because the Model went
 `Failed → Booting`, which changed the Managed Resource's requirements. With
 desire expressed directly, clicking Start when the engine is already wanted
 changes nothing — so the migrated version says what it always meant:
-`controller.retry(engineRef)`. Same-key retry (`docs/spec.md` §93) earned its
+`controller.retry(engineRef)`. Same-key retry (`docs/spec.md` §9.3) earned its
 place here by being *required*, and the upstream app's own behaviour is what
 demanded it, not a design argument.
 
@@ -108,7 +107,7 @@ meantime.
 **5. Layer interop needed nothing.** `Layer.build(engineLayer)` inside the
 lifetime's Scope publishes its Context to the family, exactly as the upstream
 `acquire` built it into the resource's Scope. No reconciler-specific Layer
-support was needed, which is what `docs/spec.3.md` §44 hoped for.
+support was needed, which is what `docs/spec.md` §12.2 hoped for.
 
 **6. The upstream app found two bugs in the test harness.** Running real code
 through the driver exposed that a failed acquisition must be retried once

@@ -80,7 +80,7 @@ describe("shutdown", () => {
       }
     }))
 
-  it.live("§55 — scope teardown shuts the controller down and closes live lifetimes", () =>
+  it.live("§8.6 — scope teardown shuts the controller down and closes live lifetimes", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       // A nested Scope: the Controller must shut down when it closes, before

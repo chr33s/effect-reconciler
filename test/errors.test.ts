@@ -1,5 +1,5 @@
 /**
- * The public error algebra (spec.3 §32).
+ * The public error algebra (spec §10).
  *
  * Every expected failure is Effect-style tagged data carrying the family it
  * concerns, so recovery is ordinary `catchTag` / `catchTags` work and never

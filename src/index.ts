@@ -16,6 +16,7 @@ export {
   DuplicateBinding,
   DuplicateDesiredKey,
   ForeignHandle,
+  ForeignLifetimeRef,
   ForeignOwner,
   ForeignRequirement,
   InvalidDesiredState,

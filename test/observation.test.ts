@@ -1,5 +1,5 @@
 /**
- * Semantic observation (spec.2 §3): what an application may learn about the
+ * Semantic observation (spec §9): what an application may learn about the
  * lifetimes it asked for.
  *
  * The contract is deliberately two-sided. `status` is authoritative and cannot
@@ -115,7 +115,7 @@ describe("status", () => {
 })
 
 describe("failure stream", () => {
-  it.live("§3.1/§3.2 — reports current desire only, never a stale generation", () =>
+  it.live("§9.2 — reports current desire only, never a stale generation", () =>
     Effect.gen(function* () {
       const gate = yield* Deferred.make<void>()
       const Def = Reconciler.define((define) => ({
@@ -153,7 +153,7 @@ describe("failure stream", () => {
       expect(received[0]!.lifetime.key).toBe("bad")
     }))
 
-  it.live("§3.3 — a retry that fails again reports a fresh failure", () =>
+  it.live("§9.2 — a retry that fails again reports a fresh failure", () =>
     Effect.gen(function* () {
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", {
@@ -178,7 +178,7 @@ describe("failure stream", () => {
       expect(again[0]!.lifetime.key).toBe("a")
     }))
 
-  it.live("§3.4/§3.5 — subscriptions are Scope-owned and retain nothing when absent", () =>
+  it.live("§9.2 — subscriptions are Scope-owned and retain nothing when absent", () =>
     Effect.gen(function* () {
       const Def = Reconciler.define((define) => ({
         Res: define.many("Res", {
@@ -215,7 +215,7 @@ describe("failure stream", () => {
       expect((yield* drainFailures(later)).map((failure) => failure.lifetime.key)).toEqual(["c"])
     }))
 
-  it.live("§3.6/§3.7 — overflow drops the oldest and never blocks reconciliation", () =>
+  it.live("§9.2 — overflow drops the oldest and never blocks reconciliation", () =>
     Effect.gen(function* () {
       const started: Array<string> = []
       const Def = Reconciler.define((define) => ({

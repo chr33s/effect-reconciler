@@ -1,5 +1,5 @@
 /**
- * Same-key retry (spec.2 §1).
+ * Same-key retry (spec §9.3).
  *
  * A failed lifetime keeps its slot until desire changes, which makes
  * recommitting the same state lifecycle-idempotent — recommitting cannot be
@@ -20,7 +20,7 @@ class ProviderService extends Context.Service<ProviderService, {
 }>()("test/RetryProvider") {}
 
 describe("retry", () => {
-  it.live("§1.1 — a failed root lifetime retries under the same key", () =>
+  it.live("§9.3 — a failed root lifetime retries under the same key", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       let healthy = false
@@ -60,7 +60,7 @@ describe("retry", () => {
       expect(yield* statusTag(controller, ref)).toBe("Running")
     }))
 
-  it.live("§1.2 — a failed owned lifetime retries under the same key", () =>
+  it.live("§9.3 — a failed owned lifetime retries under the same key", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       let healthy = false
@@ -102,7 +102,7 @@ describe("retry", () => {
       expect(yield* statusTag(controller, ref)).toBe("Running")
     }))
 
-  it.live("§1.3 — retry is a no-op once the owner is no longer current", () =>
+  it.live("§9.3 — retry is a no-op once the owner is no longer current", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => {
@@ -144,7 +144,7 @@ describe("retry", () => {
       expect(log).toHaveLength(attemptsUnderBob)
     }))
 
-  it.live("§1.4/§1.5 — a retried lifetime waits for its provider, then starts", () =>
+  it.live("§9.3 — a retried lifetime waits for its provider, then starts", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       let healthy = false
@@ -194,7 +194,7 @@ describe("retry", () => {
       expect(yield* statusTag(controller, ref)).toBe("Running")
     }))
 
-  it.live("§1.6 — repeated retry is idempotent", () =>
+  it.live("§9.3 — repeated retry is idempotent", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => ({
@@ -279,7 +279,7 @@ describe("retry", () => {
       yield* eventually(() => log.length === 2, "retried after the interruption")
     }))
 
-  it.live("§1.7 — retry after shutdown fails with ControllerClosed", () =>
+  it.live("§9.3 — retry after shutdown fails with ControllerClosed", () =>
     Effect.gen(function* () {
       const Def = Reconciler.define((define) => ({
         Res: define.one("Res", { start: (_key: string) => Effect.void })
@@ -298,7 +298,7 @@ describe("retry", () => {
       }
     }))
 
-  it.live("§1.8 — sequential retry waits for the failed generation's cleanup", () =>
+  it.live("§9.3 — sequential retry waits for the failed generation's cleanup", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       const releaseGate = yield* Deferred.make<void>()
@@ -339,7 +339,7 @@ describe("retry", () => {
       expect(log).toEqual(["acquire:a", "release:a", "acquire:a"])
     }))
 
-  it.live("§1.9 — retry never restarts a healthy Running lifetime", () =>
+  it.live("§9.3 — retry never restarts a healthy Running lifetime", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       const Def = Reconciler.define((define) => ({
@@ -367,7 +367,7 @@ describe("retry", () => {
       expect(yield* statusTag(controller, ref)).toBe("Running")
     }))
 
-  it.live("§1.10 — retry preserves semantic identity, so children keep their path", () =>
+  it.live("§9.3 — retry preserves semantic identity, so children keep their path", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       let healthy = false

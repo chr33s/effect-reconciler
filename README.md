@@ -2,17 +2,25 @@
 
 **State-reconciled keyed Effect lifetimes.**
 
+When an Effect application's live resources depend on changing state — a
+session, the workspaces under it, the documents under those — the coordination
+gets written by hand: predicates for what should be running, cancellation for
+what should not, provider invalidation when a dependency is replaced, and a set
+of tests for the races in between. `effect-reconciler` moves that behind two
+declarations.
+
 A Reconciler compiles a static architecture of keyed Effect lifetime families,
 lifetime ownership and capability dependencies. A Binding maps immutable
 control state into desired keys for those families. Each committed state
 atomically replaces desired state, and the Controller asynchronously converges
 live Effect Scopes and capability bindings toward that desire.
 
-This repository contains the **v0 kernel**: the smallest real implementation
-able to falsify the specification in [`docs/spec.md`](docs/spec.md), plus the
-conformance suite from the implementation plan (§9). Snapshot API,
-diagnostics, supervision/retry, incremental selectors and package polish are
-deliberately deferred (plan §3).
+This repository is the **v0 kernel**: the smallest real implementation able to
+falsify the specification in [`docs/spec.md`](docs/spec.md), plus the
+conformance suite (spec §14). It is not published to npm — publication is gated
+on migrating a keyed feature of a production application (spec §16). The
+snapshot API, diagnostics, supervision policies, incremental selectors and
+nested Reconcilers are deliberately deferred (spec §16.1).
 
 ## Usage
 
@@ -43,7 +51,7 @@ const Editor = Reconciler.define((define) => {
 const Bound = Editor.bind<Model>((bind) => ({
   session: bind.one(Editor.Session, (model) => model.user),
   workspace: bind.one(Editor.Workspace, (model, owner) =>
-    model.workspacesByUser[owner.key] // owner.key is the Session key
+    Option.fromNullable(model.workspacesByUser[owner.key]) // owner.key is the Session key
   )
 }))
 
@@ -119,18 +127,23 @@ capabilities is a root-environment requirement, and surfaces on
 const controller = Reconciler.make(Bound) // Effect<..., Scope | SettingsService>
 ```
 
-Design decisions and their evidence are in
-[`docs/decisions.md`](docs/decisions.md).
+Each design decision, what it rules out, and where its evidence lives are in
+the specification (spec §13).
 
-See [`examples/editor.ts`](examples/editor.ts) for the full editor topology
-from the spec, bound to two different control planes, and
-[`examples/foldkit`](examples/foldkit/README.md) for one Foldkit feature
-implemented with and without the reconciler, with the coordination it deletes
-measured, and [`examples/foldkit-migration`](examples/foldkit-migration/README.md)
-for an upstream Foldkit example app migrated onto it — including where that did
-not pay off.
+More complete examples:
+
+- [`examples/editor.ts`](examples/editor.ts) — the full editor topology from
+  the spec, bound to two different control planes.
+- [`examples/foldkit`](examples/foldkit/README.md) — one Foldkit feature built
+  twice, with and without the reconciler, with the coordination it deletes
+  counted from the source.
+- [`examples/foldkit-migration`](examples/foldkit-migration/README.md) — an
+  upstream Foldkit example app migrated onto it, including where that did not
+  pay off.
 
 ## Semantics proven by the conformance suite
+
+Spec §14 maps each of these to the test file that proves it.
 
 - equal keys retain physical lifetimes; changed keys replace them
 - equivalent commits create zero lifecycle churn
@@ -153,8 +166,6 @@ not pay off.
   implicit retry; `retry` retires the failed generation under the same key
 - owned selectors see the whole semantic owner path, so identical direct-owner
   keys under different ancestors stay distinct
-- `Key.struct` composition stays injective under adversarial component
-  encodings
 - a commit that returns has published; a commit interrupted before its
   publication point has published nothing
 

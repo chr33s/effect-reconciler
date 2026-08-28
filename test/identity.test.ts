@@ -114,7 +114,7 @@ describe("identity", () => {
       expect(count(log, "start:baz")).toBe(1)
     }))
 
-  it.live("§69 — the same Definition binds to multiple state types", () =>
+  it.live("§4.4 — the same Definition binds to multiple state types", () =>
     Effect.gen(function* () {
       const log: Array<string> = []
       const Def = makeSession(log)

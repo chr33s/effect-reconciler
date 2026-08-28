@@ -2,7 +2,7 @@ import * as Effect from "effect/Effect"
 import type * as Option from "effect/Option"
 import type * as Stream from "effect/Stream"
 import type * as Scope from "effect/Scope"
-import type { BindApi, Binding, BindingEntry } from "./Binding.js"
+import type { BindApi, Binding, BindingEntry, LabeledEntry } from "./Binding.js"
 import {
   HandleTypeId,
   type AnyHandle,
@@ -78,23 +78,18 @@ export const define = <H extends Record<string, AnyHandle>>(
   const bind = <State>(
     bf: (bind: BindApi<State>) => Record<string, BindingEntry<State>>
   ): Binding<State, never> => {
-    const api: BindApi<State> = {
-      one: (handle, selector) => ({
-        label: "",
-        handle: handle as AnyHandle,
-        cardinality: "one",
-        selector: selector as (state: State, owner: unknown) => unknown
-      }),
-      many: (handle, selector) => ({
-        label: "",
-        handle: handle as AnyHandle,
-        cardinality: "many",
+    const bound =
+      (cardinality: "one" | "many") =>
+      (handle: AnyHandle, selector: unknown): BindingEntry<State> => ({
+        handle,
+        cardinality,
         selector: selector as (state: State, owner: unknown) => unknown
       })
-    }
+    const api = { one: bound("one"), many: bound("many") } as unknown as BindApi<State>
     // The record key is the name the application gave this selector, and the
     // only name a foreign handle can be reported under.
-    const entries = Object.entries(bf(api)).map(([label, entry]) => ({ ...entry, label }))
+    const entries: ReadonlyArray<LabeledEntry<State>> = Object.entries(bf(api))
+      .map(([label, entry]) => ({ ...entry, label }))
     return { source, entries }
   }
 
@@ -149,7 +144,7 @@ export interface Controller<in State> {
  * Controller's root Scope is owned by the surrounding Scope; the current
  * environment at `make` becomes the root environment of every lifetime, so
  * whatever the Definition's startup Effects require beyond their Scope, their
- * ancestors and their providers is required here (§60).
+ * ancestors and their providers is required here (spec §6.2).
  */
 export const make = <State, RootR = never>(
   binding: Binding<State, RootR>

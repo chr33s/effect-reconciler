@@ -1,5 +1,5 @@
 /**
- * Definition identity (spec.2 §9).
+ * Definition identity (spec §5.4).
  *
  * A family's identity is the handle object, and a Definition's identity is a
  * per-call object compared by reference. Neither is a name or a number, so
@@ -8,8 +8,9 @@
  * whose module-local counters would both start at one.
  */
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Option } from "effect"
+import { Cause, Effect, Exit, Option } from "effect"
 import { HandleTypeId, type OneHandle } from "../src/Definition.js"
+import type { ForeignLifetimeRef } from "../src/Errors.js"
 import * as Reconciler from "../src/Reconciler.js"
 import { statusTag } from "./util.js"
 
@@ -129,5 +130,28 @@ describe("definition identity", () => {
       expect(yield* statusTag(controller, Reconciler.ref(Def.First, "x", null))).toBe("Running")
       expect(yield* statusTag(controller, Reconciler.ref(Def.Second, "x", null))).toBe("None")
       expect(log).toEqual(["first:x"])
+    }))
+
+  it.live("a reference from another Definition is a tagged defect, not a silent miss", () =>
+    Effect.gen(function* () {
+      const A = Reconciler.define((define) => ({
+        Thing: define.one("Thing", { start: (_: string) => Effect.void })
+      }))
+      const B = Reconciler.define((define) => ({
+        Thing: define.one("Thing", { start: (_: string) => Effect.void })
+      }))
+      const controller = yield* Reconciler.make(
+        A.bind<{}>((bind) => ({ thing: bind.one(A.Thing, () => Option.none()) }))
+      )
+
+      // Naming B's family cannot match anything here, and answering `None`
+      // would hide the mistake rather than report it.
+      const exit = yield* Effect.exit(controller.status(Reconciler.ref(B.Thing, "x", null)))
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        const defect = Cause.squash(exit.cause) as ForeignLifetimeRef
+        expect(defect._tag).toBe("ForeignLifetimeRef")
+        expect(defect.family).toBe(B.Thing)
+      }
     }))
 })

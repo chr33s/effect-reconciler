@@ -8,19 +8,44 @@ export const HandleTypeId: unique symbol = Symbol.for("effect-reconciler/Handle"
 export type HandleTypeId = typeof HandleTypeId
 
 /**
- * Opaque handle for a `define.one` lifetime family. The handle itself is the
+ * The static contract every lifetime handle carries. The handle itself is the
  * authoritative nominal identity of the family; the string name is a
  * human-readable label.
  *
- * The type parameters carry the family's static contract (§28, §29):
+ * The type parameters carry that contract (spec §6.2, §6.3):
  *
  * - `K` semantic key type, `Own` the owner reference its selector receives
  *   (`null` for root families)
  * - `P` the services this family publishes to its children and dependents
  * - `Env` the services visible to its children: every ancestor's published
  *   services plus its own
- * - `RR` the services its startup still needs from the root environment (§60);
+ * - `RR` the services its startup still needs from the root environment (spec §6.2);
  *   these propagate to `Reconciler.make`.
+ */
+export interface HandleContract<
+  in out K,
+  in out Own = null,
+  out P = never,
+  out Env = never,
+  out RR = never
+> {
+  readonly name: string
+  // Phantom carriers, never present at runtime: a handle is only ever
+  // produced by this package, through a cast. They are required rather than
+  // optional so that inferring against this shape yields the parameter
+  // itself, not `T | undefined`.
+  readonly _key: K
+  readonly _owner: Own
+  readonly _provides: P
+  readonly _childEnv: Env
+  readonly _rootRequires: RR
+}
+
+/**
+ * Opaque handle for a `define.one` lifetime family. Cardinality is the only
+ * thing that separates the two handle types, so it is the only thing they add
+ * to the shared contract — and the extractors below match that one shape
+ * instead of both of them.
  */
 export interface OneHandle<
   in out K,
@@ -28,14 +53,8 @@ export interface OneHandle<
   out P = never,
   out Env = never,
   out RR = never
-> {
+> extends HandleContract<K, Own, P, Env, RR> {
   readonly [HandleTypeId]: "one"
-  readonly name: string
-  readonly _key?: K
-  readonly _owner?: Own
-  readonly _provides?: P
-  readonly _childEnv?: Env
-  readonly _rootRequires?: RR
 }
 
 /** Opaque handle for a `define.many` lifetime family. */
@@ -45,14 +64,8 @@ export interface ManyHandle<
   out P = never,
   out Env = never,
   out RR = never
-> {
+> extends HandleContract<K, Own, P, Env, RR> {
   readonly [HandleTypeId]: "many"
-  readonly name: string
-  readonly _key?: K
-  readonly _owner?: Own
-  readonly _provides?: P
-  readonly _childEnv?: Env
-  readonly _rootRequires?: RR
 }
 
 export type AnyHandle =
@@ -63,14 +76,13 @@ export type AnyHandle =
 // `any` in an invariant position (`K`, `OK`) makes the extends-check fail
 // against handles whose owner key is `never`, silently yielding `never`.
 
-export type KeyOf<H> = H extends OneHandle<infer K, infer _Own, infer _P, infer _E, infer _RR> ? K
-  : H extends ManyHandle<infer K, infer _Own, infer _P, infer _E, infer _RR> ? K
+export type KeyOf<H> = H extends HandleContract<infer K, infer _Own, infer _P, infer _E, infer _RR>
+  ? K
   : never
 
 /** The owner reference a family's own selector receives. */
-export type OwnerOf<H> = H extends OneHandle<infer _K, infer Own, infer _P, infer _E, infer _RR>
+export type OwnerOf<H> = H extends HandleContract<infer _K, infer Own, infer _P, infer _E, infer _RR>
   ? Own
-  : H extends ManyHandle<infer _K, infer Own, infer _P, infer _E, infer _RR> ? Own
   : null
 
 /**
@@ -81,30 +93,28 @@ export type OwnerOf<H> = H extends OneHandle<infer _K, infer Own, infer _P, infe
 export type OwnerRefFor<O> = [O] extends [never] ? null : LifetimeRef<Extract<O, AnyHandle>>
 
 /** The services a family publishes to its children and dependents. */
-export type ProvidesOf<H> = H extends OneHandle<infer _K, infer _Own, infer P, infer _E, infer _RR> ? P
-  : H extends ManyHandle<infer _K, infer _Own, infer P, infer _E, infer _RR> ? P
+export type ProvidesOf<H> = H extends
+  HandleContract<infer _K, infer _Own, infer P, infer _E, infer _RR> ? P
   : never
 
 /** The services a family's children see: every ancestor's published services. */
-export type ChildEnvOf<H> = H extends OneHandle<infer _K, infer _Own, infer _P, infer Env, infer _RR>
-  ? Env
-  : H extends ManyHandle<infer _K, infer _Own, infer _P, infer Env, infer _RR> ? Env
+export type ChildEnvOf<H> = H extends
+  HandleContract<infer _K, infer _Own, infer _P, infer Env, infer _RR> ? Env
   : never
 
 /** The root-environment services a family's startup still needs. */
-export type RootRequirementsOf<H> = H extends OneHandle<infer _K, infer _Own, infer _P, infer _E, infer RR>
-  ? RR
-  : H extends ManyHandle<infer _K, infer _Own, infer _P, infer _E, infer RR> ? RR
+export type RootRequirementsOf<H> = H extends
+  HandleContract<infer _K, infer _Own, infer _P, infer _E, infer RR> ? RR
   : never
 
 /**
- * The services a startup Effect publishes (§29): returning a
+ * The services a startup Effect publishes (spec §6.3): returning a
  * `Context.Context<S>` publishes `S`; any other result publishes nothing.
  */
 export type Published<A> = A extends Context.Context<infer S> ? S : never
 
 /**
- * The startup environment a family gets beyond the root environment (§28):
+ * The startup environment a family gets beyond the root environment (spec §6.2):
  * the services published by its ancestors and by its required providers, plus
  * its own instance Scope.
  */

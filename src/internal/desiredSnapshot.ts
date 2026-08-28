@@ -1,7 +1,7 @@
 import * as MutableHashMap from "effect/MutableHashMap"
 import * as Option from "effect/Option"
 import * as Result from "effect/Result"
-import type { BindingEntry } from "../Binding.js"
+import type { LabeledEntry } from "../Binding.js"
 import {
   DuplicateDesiredKey,
   InvalidDesiredState,
@@ -11,7 +11,8 @@ import {
 } from "../Errors.js"
 import type { LifetimeRef } from "../LifetimeRef.js"
 import type { Compiled } from "./compiledDefinition.js"
-import { Ident, oneSlot } from "./identity.js"
+import { Ident, slotIdent } from "./identity.js"
+import type { LiveInstance } from "./liveState.js"
 
 /** One desired instance: family + semantic key, owner-relative. */
 export interface DesiredNode {
@@ -27,8 +28,10 @@ export interface DesiredNode {
    */
   readonly slot: Ident
   readonly parent: DesiredNode | null
-  /** Desired instance chain from root to this node (inclusive). */
-  readonly chain: ReadonlyArray<DesiredNode>
+  /** Owner chain from the root down to this node's parent, root-most first.
+   * Requirements only ever name strict ancestors, so the node itself is not
+   * in it — which is also what lets it be built before the node exists. */
+  readonly ancestors: ReadonlyArray<DesiredNode>
   readonly childrenByFamily: ReadonlyMap<number, ReadonlyArray<DesiredNode>>
   /**
    * The pure semantic reference of this node: family handle, key and owner
@@ -41,7 +44,7 @@ export interface DesiredNode {
    * reconciler. A pass that has already matched instances to desire can then
    * skip satisfied nodes without hashing anything.
    */
-  live: unknown
+  live: LiveInstance | undefined
 }
 
 /** One coherent desired snapshot produced by evaluating a Binding against a
@@ -67,7 +70,7 @@ const push = (map: Map<number, Array<DesiredNode>>, id: number, node: DesiredNod
 
 export const evaluate = <State>(
   compiled: Compiled,
-  entries: ReadonlyMap<number, BindingEntry<State>>,
+  entries: ReadonlyMap<number, LabeledEntry<State>>,
   state: State
 ): Result.Result<DesiredSnapshot, InvalidDesiredState> => {
   const byIdent = MutableHashMap.empty<Ident, DesiredNode>()
@@ -115,16 +118,13 @@ export const evaluate = <State>(
         }
 
         const childrenByFamily = new Map<number, Array<DesiredNode>>()
-        const parentIdent = parent === null ? null : parent.ident
         const node: DesiredNode = {
           familyId: family.id,
           key,
           ident,
-          slot: family.cardinality === "one"
-            ? new Ident(family.id, oneSlot, parentIdent)
-            : ident,
+          slot: slotIdent(family.id, family.cardinality, ident),
           parent,
-          chain: [],
+          ancestors: parent === null ? [] : [...parent.ancestors, parent],
           childrenByFamily,
           ref: {
             family: family.handle,
@@ -133,8 +133,6 @@ export const evaluate = <State>(
           },
           live: undefined
         }
-        ;(node as { chain: ReadonlyArray<DesiredNode> }).chain =
-          parent === null ? [node] : [...parent.chain, node]
         MutableHashMap.set(byIdent, ident, node)
         topo.push(node)
         familyNodes.push(node)

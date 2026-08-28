@@ -1,9 +1,14 @@
 # Scale benchmark
 
 Run with `npm run bench`. These are the numbers **before** any incremental
-optimization exists: no reverse dependency index, no dirty-slot or dirty-family
-queues, no incremental binding invalidation. The point of recording them is to
-know which of those, if any, a real workload actually needs.
+optimization exists: no dirty-slot or dirty-family queues, no incremental
+binding invalidation, and no way to avoid the full sweep of live instances that
+every reconcile pass does. The point of recording them is to know which of
+those, if any, a real workload actually needs.
+
+Obsolescence *does* travel a reverse provider-to-dependent index, but that is
+not one of the optimizations above: it replaced a fixpoint sweep with a walk of
+the same edges, and it is measurably neither faster nor slower here.
 
 Recorded 2026-08-28 · Node v24.18.1 · darwin arm64 · Apple M5 Max.
 
@@ -25,26 +30,42 @@ skewed by GC and by the first pass after a snapshot changes, and a lone sample
 hides that. The cold build is a single sample, because an application only ever
 starts once.
 
+Each figure below is the **median of three whole runs** of that seven-sample
+method, not one run. A single run is not enough: at 10,000 documents the commit
+column is bimodal between roughly 9 ms and 13 ms, and which mode a run lands in
+has nothing to do with the code under test. Comparing two single runs at that
+size produces differences of ±50% that reproduce in neither direction.
+
+> **Convergence timings before and after 2026-08-28 are not comparable at 100
+> and 1,000 documents.** `converge` is measured with the test-hook convergence
+> barrier, and that barrier used to poll on a 1 ms timer, which put a ~1 ms
+> floor under every sample. It is now signalled at the end of a reconcile pass.
+> At 100 documents the previously recorded converge figures were largely that
+> floor — the equivalent commit, which starts and stops nothing at all, was
+> recorded at 1.43 ms and now measures 0.16 ms. The runtime did not get faster;
+> the measurement stopped including the poll. The 10,000-document figures are
+> unaffected, since a pass there takes far longer than the poll interval.
+
 | documents | scenario | commit p50 | commit p95 | converge p50 | converge p95 | selector evals | starts | stops |
 | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 100 | build (cold, one sample) | 0.73 | 0.73 | 5.74 | 5.74 | 105 | 204 | 0 |
-| 100 | A equivalent commit | 0.10 | 0.15 | 1.43 | 1.64 | 105 | 0 | 0 |
-| 100 | B one document changed | 0.10 | 0.12 | 1.59 | 3.73 | 105 | 2 | 2 |
-| 100 | C settings replaced | 0.10 | 0.16 | 2.69 | 2.86 | 105 | 101 | 101 |
-| 100 | D language replaced | 0.10 | 0.13 | 2.37 | 2.79 | 105 | 101 | 101 |
-| 100 | E workspace replaced | 0.13 | 0.16 | 2.93 | 6.77 | 105 | 202 | 202 |
-| 1000 | build (cold, one sample) | 0.90 | 0.90 | 18.27 | 18.27 | 1005 | 2004 | 0 |
-| 1000 | A equivalent commit | 0.72 | 1.44 | 1.07 | 4.49 | 1005 | 0 | 0 |
-| 1000 | B one document changed | 0.69 | 1.86 | 2.47 | 6.46 | 1005 | 2 | 2 |
-| 1000 | C settings replaced | 0.65 | 0.69 | 14.71 | 17.26 | 1005 | 1001 | 1001 |
-| 1000 | D language replaced | 0.65 | 0.75 | 14.33 | 29.23 | 1005 | 1001 | 1001 |
-| 1000 | E workspace replaced | 0.71 | 9.55 | 17.52 | 23.49 | 1005 | 2002 | 2002 |
-| 10000 | build (cold, one sample) | 8.37 | 8.37 | 176.70 | 176.70 | 10005 | 20004 | 0 |
-| 10000 | A equivalent commit | 7.57 | 19.40 | 21.75 | 29.20 | 10005 | 0 | 0 |
-| 10000 | B one document changed | 8.43 | 12.95 | 24.07 | 96.67 | 10005 | 2 | 2 |
-| 10000 | C settings replaced | 11.73 | 41.51 | 185.78 | 262.35 | 10005 | 10001 | 10001 |
-| 10000 | D language replaced | 8.15 | 12.23 | 186.97 | 322.37 | 10005 | 10001 | 10001 |
-| 10000 | E workspace replaced | 8.29 | 11.89 | 212.36 | 252.02 | 10005 | 20002 | 20002 |
+| 100 | build (cold, one sample) | 0.69 | 0.69 | 3.96 | 3.96 | 105 | 204 | 0 |
+| 100 | A equivalent commit | 0.11 | 0.17 | 0.16 | 0.49 | 105 | 0 | 0 |
+| 100 | B one document changed | 0.08 | 0.10 | 0.24 | 2.42 | 105 | 2 | 2 |
+| 100 | C settings replaced | 0.10 | 0.36 | 1.79 | 2.78 | 105 | 101 | 101 |
+| 100 | D language replaced | 0.09 | 0.47 | 1.33 | 2.62 | 105 | 101 | 101 |
+| 100 | E workspace replaced | 0.09 | 0.19 | 1.73 | 4.78 | 105 | 202 | 202 |
+| 1000 | build (cold, one sample) | 0.88 | 0.88 | 17.55 | 17.55 | 1005 | 2004 | 0 |
+| 1000 | A equivalent commit | 0.74 | 1.82 | 1.16 | 2.46 | 1005 | 0 | 0 |
+| 1000 | B one document changed | 0.68 | 0.71 | 1.27 | 4.99 | 1005 | 2 | 2 |
+| 1000 | C settings replaced | 0.75 | 3.10 | 16.78 | 18.52 | 1005 | 1001 | 1001 |
+| 1000 | D language replaced | 0.74 | 0.77 | 16.17 | 29.60 | 1005 | 1001 | 1001 |
+| 1000 | E workspace replaced | 0.72 | 0.74 | 17.66 | 40.28 | 1005 | 2002 | 2002 |
+| 10000 | build (cold, one sample) | 8.73 | 8.73 | 153.45 | 153.45 | 10005 | 20004 | 0 |
+| 10000 | A equivalent commit | 8.82 | 21.09 | 25.73 | 35.22 | 10005 | 0 | 0 |
+| 10000 | B one document changed | 8.98 | 9.76 | 32.42 | 46.28 | 10005 | 2 | 2 |
+| 10000 | C settings replaced | 13.22 | 16.09 | 193.48 | 344.19 | 10005 | 10001 | 10001 |
+| 10000 | D language replaced | 9.72 | 34.58 | 203.07 | 400.22 | 10005 | 10001 | 10001 |
+| 10000 | E workspace replaced | 8.73 | 14.43 | 216.97 | 240.64 | 10005 | 20002 | 20002 |
 
 The topology is the editor from the specification, so each document carries a
 `Diagnostics` child that depends on both `Settings` and `Language`: a build of
@@ -79,26 +100,25 @@ Two costs scale with N rather than with the size of the change:
    against the new state, which is what makes commits pure and coalescing
    trivial — but it is also the entire cost of a no-op commit.
 2. **Commit latency tracks that evaluation**: ~0.1 ms at 100 documents, ~0.7 ms
-   at 1,000, and at 10,000 a p50 of ~8 ms with a p95 near 19 ms. Selector
+   at 1,000, and at 10,000 a p50 of ~9 ms with a p95 near 21 ms. Selector
    evaluation happens outside the critical section and outside the atomic
    publication region, so this is latency at the caller's mutation boundary,
    not time holding the controller.
 
-At 10,000 documents a no-op commit costs about 8 ms of pure selector work (p95
-~19 ms) plus about 22 ms of background convergence to confirm there is nothing
+At 10,000 documents a no-op commit costs about 9 ms of pure selector work (p95
+~21 ms) plus about 26 ms of background convergence to confirm there is nothing
 to do. For an editor-sized workload — hundreds to low thousands of documents —
 commit is under a millisecond and needs nothing further.
 
 The p95 columns are worth reading before optimizing anything: at 10,000
-documents the tail is 2–3× the median for commits and up to 4× for
-convergence (scenario B), which is GC and first-pass-after-a-snapshot cost, not
-a different algorithm.
+documents the tail is 2–4× the median for commits and about 2× for convergence
+on the provider-replacement scenarios, which is GC and
+first-pass-after-a-snapshot cost, not a different algorithm.
 
 ## When to optimize
 
-Incremental machinery — reverse dependency indexes, dirty-slot or dirty-family
-queues, incremental binding invalidation — is worth adding when a real workload
-shows one of:
+Incremental machinery — dirty-slot or dirty-family queues, incremental binding
+invalidation — is worth adding when a real workload shows one of:
 
 - commits at a rate where `N + 5` selector evaluations per commit dominate the
   frame budget (roughly: >10,000 instances committed on every keystroke, where
@@ -111,9 +131,9 @@ measurement, not the shape of the code, should decide.
 
 ## Identity: encoded strings versus Effect `Equal` / `Hash`
 
-`docs/spec.3.md` Phase C required benchmarking Effect-native key identity
-against the encoded-string scheme it replaced, and not switching the public API
-until parity was shown.
+Effect-native key identity had to be benchmarked against the encoded-string
+scheme it replaced, with the public API not switching until parity was shown
+(`docs/spec.md` §13.10).
 
 Both were measured at 10,000 documents — the size where the difference is
 visible at all — under the *previous* single-sample methodology. They are
@@ -133,7 +153,7 @@ switch changed how identity is computed, not what is identical to what.
 
 The first implementation was about 2× slower on the convergence path, which is
 not parity. Three changes closed the gap, none of them incremental dependency
-tracking (spec.3 §47 — full-snapshot semantics are preserved):
+tracking (`docs/spec.md` §15 — full-snapshot semantics are preserved):
 
 1. semantic identities cache their hash and compare hashes before walking the
    key or the owner chain;

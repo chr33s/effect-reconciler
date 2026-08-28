@@ -1,2248 +1,330 @@
-# effect-reconciler
+# effect-reconciler — specification
 
-## Runtime Specification v0.9
+**State-reconciled keyed Effect lifetimes.**
 
-> v0.8 added §92–§96: semantic lifetime references, same-key retry, failed-slot
-> semantics, the failure observation contract and Definition identity.
-> v0.9 adds §97–§99: Effect-native key identity, the tagged error algebra and
-> the observation surface. Each was implemented, tested and — for key identity
-> — benchmarked before being written down, per `docs/spec.2.md` §13 and
-> `docs/spec.3.md` §52.
+> A Reconciler compiles a static architecture of keyed Effect lifetime
+> families, lifetime ownership and capability dependencies. A Binding maps
+> immutable control state into desired keys for those families. Each committed
+> state atomically replaces desired state, and the Controller asynchronously
+> converges live Effect Scopes and capability bindings toward that desire.
 
-## 1. Thesis
+This document is the contract of the v0 kernel, the reasoning behind it (§13),
+and what has been proven (§14). The conformance suite in `test/` is the
+executable form of that contract; where the two disagree, the suite wins and
+this document is wrong.
 
-Effect already provides the execution primitives required for sophisticated long-lived runtimes:
+## 1. What it is
 
-```text
-Scope
-Fiber
-Layer
-Context
-Stream
-Resource
-interruption
-finalization
-RcMap
-LayerMap
-```
+### 1.1 The problem
 
-Applications still repeatedly need coordination logic around those primitives when runtime resources depend on changing application state.
-
-Typical examples include:
+Effect already provides what long-lived runtimes execute on: `Scope`, `Fiber`,
+`Layer`, `Context`, `Stream`, interruption, finalization, `RcMap`, `LayerMap`.
+What applications keep rewriting is the coordination around them — translating
 
 ```text
-authenticated sessions
-workspaces
-device connections
-language servers
-document runtimes
-collaboration sessions
-plugin hosts
-background workers
-tenant-specific services
-dynamically selected databases
+current control state  →  which keyed Effect lifetimes should exist
 ```
 
-The recurring problem is not resource acquisition itself.
+while handling ownership, readiness, replacement, cancellation, dynamic
+capability dependencies, rapid state churn, startup failure and
+resource-generation isolation.
 
-It is translating:
+Authenticated sessions, workspaces, device connections, language servers,
+document runtimes, collaboration sessions, plugin hosts, background workers,
+tenant-specific services and dynamically selected databases all have that
+shape. The recurring problem is not resource acquisition; it is deciding which
+resources should currently exist, and surviving the races on the way there.
+
+### 1.2 Non-goals
+
+`effect-reconciler` does not replace `Effect`, `Scope`, `Layer`, `Context`,
+`Fiber`, `Stream`, `RcMap` or `LayerMap`. It coordinates them. Effect answers
+how work executes, is interrupted and finalized; the Reconciler answers which
+lifetime should exist, who owns it, which provider instances it must use, when
+it became obsolete, and which desired replacement starts next.
+
+Everything it does remains expressible by hand with ordinary Effect. It earns
+its place only by removing application-written lifecycle predicates, owner
+tracking, readiness coordination, provider invalidation and race-condition
+tests (§16).
+
+## 2. The public model
+
+Three concepts are public:
 
 ```text
-current control state
+Definition        the static architecture, independent of any state type
+Binding<State>    pure selectors from one control-state type into desired keys
+Controller<State> commit, observe, converge
 ```
 
-into:
-
-```text
-which keyed Effect lifetimes should exist
-```
-
-while correctly handling:
-
-```text
-ownership
-readiness
-replacement
-cancellation
-dynamic capability dependencies
-rapid state churn
-startup failure
-resource-generation isolation
-```
-
-`effect-reconciler` provides:
-
-> **A Reconciler that defines static families of keyed Effect lifetimes and their ownership/capability relationships. A Binding maps arbitrary control state into desired instances. Committing state atomically updates desire; the Reconciler asynchronously converges the Effect runtime.**
-
-The public model is:
-
-```text
-Reconciler Definition
-        ↓
-Binding<State>
-        ↓
-Controller.commit(state)
-        ↓
-Effect lifetimes
-```
-
-The internal architectural model is:
-
-```text
-compiled lifetime ownership tree
-+
-capability dependency DAG
-+
-desired instances
-+
-live physical generations
-```
-
-This internal structure may be described as a **dynamic Effect topology**.
-
-Topology is an implementation and architectural concept, not the primary public API vocabulary.
-
----
-
-## 2. Product thesis
-
-Sophisticated Effect applications repeatedly implement small stateful controllers that coordinate:
-
-```text
-desired keyed resources
-nested Scope lifetimes
-resource readiness
-provider availability
-replacement races
-stale startup cancellation
-dependent invalidation
-generation-safe environments
-latest-state coalescing
-```
-
-These controllers can be implemented manually with ordinary Effect.
-
-The opportunity is not new computational capability.
-
-The opportunity is:
-
-> **Move recurring dynamic-resource coordination obligations from application code into reusable Effect-native infrastructure.**
-
-The intended value is practical compression:
-
-```text
-before:
-application-specific lifecycle controller
-
-after:
-static lifetime definitions
-+
-pure state bindings
-```
-
-`effect-reconciler` is therefore a coordination abstraction rather than a new Effect execution model.
-
----
-
-## 3. Non-goal: a new Effect execution model
-
-`effect-reconciler` does not replace:
-
-```text
-Effect
-Scope
-Layer
-Context
-Fiber
-Stream
-RcMap
-LayerMap
-```
-
-It coordinates them.
-
-Effect answers:
-
-```text
-How does work execute?
-How is it interrupted?
-How are resources acquired?
-How are finalizers run?
-How are services represented?
-```
-
-The Reconciler answers:
-
-```text
-Which lifetime should exist?
-Who owns it?
-Which provider instances must it use?
-When has it become obsolete?
-Which desired replacement should start next?
-```
-
----
-
-## 4. Public concepts
-
-The stable public model should remain deliberately small.
-
-The primary concepts are:
-
-```text
-Definition
-Binding<State>
-Controller
-```
-
-Application code also uses opaque lifetime handles returned by the Definition builder.
-
-The public API should not require normal users to manipulate concepts named:
-
-```text
-Topology
-DesiredTopology
-Desire
-ProcessSpec
-ProcessGeneration
-TopologyRevision
-LiveProcess
-```
-
-Those concepts may exist internally.
-
-They are not required as first-class user vocabulary.
-
----
-
-## 5. Package
-
-The standalone package is conceptually:
-
-```text
-effect-reconciler
-```
-
-The package exposes the generic Effect-native Reconciler.
-
-Foldkit integration should consume the same package and the same lifetime handles.
-
-A separate runtime identity system must not be introduced by adapters.
-
-Conceptually:
-
-```text
-application
-├── effect
-├── effect-reconciler
-└── foldkit
-```
-
-If a dedicated Foldkit integration package becomes necessary, it should depend on `effect-reconciler` as a peer dependency rather than bundling an independent copy.
-
----
-
-## 6. Architecture
-
-```text
-                     CONTROL STATE
-
-              Foldkit Model / Config /
-              State Machine / other state
-                        │
-                        ▼
-                  Binding<State>
-                        │
-                        │ pure selection
-                        ▼
-                Desired Instances
-                        │
-                        │ atomic publication
-                        ▼
-                    Controller
-                   /          \
-                  /            \
-                 ▼              ▼
-          ownership graph   capability graph
-                 \              /
-                  \            /
-                   ▼          ▼
-                  Live Effect Runtime
-
-                    Scope Tree
-                        +
-              immutable provider bindings
-```
-
-The internal ownership and capability graphs together form the runtime's **dynamic Effect topology**.
-
----
-
-## 7. Static versus dynamic information
-
-The architecture explicitly separates static and dynamic information.
-
-### Static
-
-Defined once:
-
-```text
-which lifetime families exist
-one versus many cardinality
-semantic key equality
-who owns whom
-who requires whom
-startup behavior
-replacement policy
-```
-
-### Dynamic
-
-Supplied on each state commit:
-
-```text
-which keys are currently desired
-under which desired owners
-```
-
-Therefore:
-
-> **The runtime architecture is mostly static. Desire is dynamic.**
-
-The public API reflects that distinction without requiring users to construct topology objects or desired trees manually.
-
----
-
-## 8. Reconciler Definition
-
-A Definition describes the reusable Effect runtime architecture.
-
-Conceptually:
+Application code also holds opaque family handles returned by the Definition
+builder. Internally the runtime maintains a lifetime ownership tree, a
+capability dependency DAG, desired instances and live physical generations —
+its *dynamic Effect topology*. That vocabulary is architectural, never
+required of a user, and never exposed (§9.4, §13.2).
 
 ```ts
-const Editor =
-  Reconciler.define(define => {
-    // lifetime families
-
-    return {
-      ...
-    }
-  })
+const controller = yield* Reconciler.make(Bound)
+yield* controller.commit(state)
 ```
 
-A Definition is independent of any particular application state type.
+## 3. Definition
 
-It may be reused with:
+A Definition declares the reusable runtime architecture: which families exist,
+their cardinality, ownership, capability requirements, startup and replacement
+policy. It does not mention any application state type.
+
+### 3.1 Families and cardinality
+
+`define.one` admits at most one keyed instance per owner instance; the instance
+may also be absent. `define.many` admits zero or more independently keyed
+instances per owner, each reconciled on its own.
 
 ```text
-Foldkit Model
-daemon configuration
-desktop application state
-test scenario state
-another control plane
+Session[alice]                 Workspace[acme]
+└── Workspace[acme]            ├── Document[foo]
+                               ├── Document[bar]
+                               └── Document[baz]
 ```
 
-without duplicating ownership, dependency, or startup definitions.
+The string label is human-readable; the handle object is the identity (§5.4).
 
----
+### 3.2 Semantic keys
 
-## 9. Lifetime handles
-
-Definitions create opaque lifetime handles.
-
-Example:
+A family declares no key descriptor. The key type is inferred from `start`, and
+identity is `Equal.equals` with `Hash.hash` — the convention `RcMap` and the
+Effect collections already use.
 
 ```ts
-const Session =
-  define.one("Session", {
-    ...
-  })
+define.one("Session", { start: (userId: string) => ... })
 ```
 
-`Session` is used as the stable nominal identity for that lifetime family.
+Primitives work as themselves. Structural keys are ordinary values — a plain
+object, an array, an Effect `Data` value — because Effect compares and hashes
+all of them structurally. Nothing is serialized, so nothing has to be escaped.
 
-Handles may be referenced by:
+The rule for what belongs in a key is semantic:
 
-```text
-owner
-requires
-bindings
-tests
-diagnostics
-```
+> Put a value in the semantic key only when changing it should create a
+> different semantic lifetime.
 
-The string `"Session"` is primarily a human-readable label.
+Two further rules are part of the contract and are **not checked at runtime**:
 
-The handle itself is authoritative identity.
+- **Keys are immutable.** Identity is cached per key value, so mutating a key
+  after it has been desired corrupts the identity it was admitted under.
+- **Keys compare stably.** A reference-compared value — a plain function, or
+  anything wrapped in `Equal.byReference` — is a valid key exactly when the
+  Binding yields the same value on every commit, and churns the lifetime on
+  every commit when it does not.
 
-The API should not require a separate `ProcessTag`.
+`start`'s parameter must be annotated so the key type can be inferred;
+`(_: null)` names a family whose key carries no information. An un-inferable
+key type is a compile error rather than `unknown`, which would let a Binding
+desire anything at all for that family.
 
----
+### 3.3 Ownership
 
-## 10. Cardinality
+Every family has exactly one owner: the root, or another family.
 
-Cardinality is part of the static definition.
+> A child may never outlive the physical owner instance beneath which it was
+> admitted.
 
-v0 supports two forms.
+Obsolescence is therefore structural: if a Session becomes obsolete, its
+Workspaces and their Documents do too, without any child selector restating the
+ancestor condition (§11).
 
-### `define.one`
+### 3.4 Capability requirements and provider resolution
 
-At most one keyed instance exists per owner instance.
-
-Example:
-
-```text
-Application
-└── Session[alice]
-```
-
-or:
-
-```text
-Session[alice]
-└── Workspace[acme]
-```
-
-The instance may also be absent.
-
-### `define.many`
-
-Zero or more independently keyed instances exist per owner.
-
-Example:
-
-```text
-Workspace[acme]
-├── Document[foo]
-├── Document[bar]
-└── Document[baz]
-```
-
-Each key is reconciled independently.
-
----
-
-## 11. Example Definition
-
-Conceptually:
+Ownership means "cannot outlive". `requires` means "cannot run without".
+Requirements are static and named, so they can be added without disturbing
+positional arguments:
 
 ```ts
-const Editor =
-  Reconciler.define(define => {
-    const Settings =
-      define.one("Settings", {
-        key:
-          Key.number,
-
-        start:
-          settingsRevision =>
-            SettingsRuntime.open(
-              settingsRevision
-            )
-      })
-
-    const Session =
-      define.one("Session", {
-        key:
-          Key.string,
-
-        replacement:
-          Replacement.overlap(),
-
-        start:
-          userId =>
-            SessionRuntime.open(userId)
-      })
-
-    const Workspace =
-      define.one("Workspace", {
-        key:
-          Key.string,
-
-        owner:
-          Session,
-
-        replacement:
-          Replacement.sequential(),
-
-        start:
-          workspaceId =>
-            WorkspaceRuntime.open(
-              workspaceId
-            )
-      })
-
-    const Language =
-      define.one("Language", {
-        key:
-          Key.string,
-
-        owner:
-          Workspace,
-
-        start:
-          language =>
-            LanguageRuntime.open(language)
-      })
-
-    const Document =
-      define.many("Document", {
-        key:
-          Key.string,
-
-        owner:
-          Workspace,
-
-        start:
-          uri =>
-            DocumentRuntime.open(uri)
-      })
-
-    const Diagnostics =
-      define.one("Diagnostics", {
-        key:
-          Key.null,
-
-        owner:
-          Document,
-
-        requires: {
-          settings:
-            Settings,
-
-          language:
-            Language
-        },
-
-        start:
-          () =>
-            DiagnosticsRuntime.open
-      })
-
-    return {
-      Settings,
-      Session,
-      Workspace,
-      Language,
-      Document,
-      Diagnostics
-    }
-  })
+requires: { settings: Settings, language: Language }
 ```
 
-The exact TypeScript syntax remains provisional.
+Requirements may form a DAG but never a cycle. A requirement resolves either to
+an **ancestor** instance, or to the unique `one` instance owned by an ancestor
+or by the root. A `many` provider is rejected as ambiguous when the Definition
+is compiled: with several candidates there is no defensible answer to "which
+one?" (§13.7).
 
-The semantics are not.
+Ownership must not be used merely to reach a service. Settings does not become
+an ancestor of Diagnostics just to supply its capability; that is what the two
+separate relations are for.
 
----
+### 3.5 Replacement policy
 
-## 12. Definition reuse
-
-The Definition must not depend on a specific state shape.
-
-For example, the same `Editor` definition may be bound to:
+Policies are constructors, not string enums:
 
 ```ts
-interface Model {
-  readonly user:
-    Option.Option<string>
-
-  readonly workspaceId:
-    Option.Option<string>
-
-  readonly language:
-    string
-
-  readonly settingsRevision:
-    number
-
-  readonly documents:
-    ReadonlyArray<string>
-}
-```
-
-or:
-
-```ts
-interface DaemonConfig {
-  readonly account:
-    Option.Option<string>
-
-  readonly project:
-    Option.Option<string>
-
-  readonly parser:
-    string
-
-  readonly settingsEpoch:
-    number
-
-  readonly files:
-    ReadonlyArray<string>
-}
-```
-
-without duplicating the Effect architecture.
-
-This reuse requirement is the reason state selectors do not belong directly on lifetime definitions.
-
----
-
-## 13. Binding
-
-A Binding maps one control-state type into desired instances of a Definition.
-
-Conceptually:
-
-```ts
-const FoldkitEditor =
-  Editor.bind<Model>(bind => ({
-    ...
-  }))
-```
-
-A separate control plane can create:
-
-```ts
-const DaemonEditor =
-  Editor.bind<DaemonConfig>(
-    bind => ({
-      ...
-    })
-  )
-```
-
-The Definition remains unchanged.
-
----
-
-## 14. Binding is pure
-
-Binding selectors must be pure.
-
-Conceptually:
-
-```text
-State
-+
-desired owner key
-        ↓
-selector
-        ↓
-desired child key(s)
-```
-
-Selectors must not:
-
-```text
-perform Effects
-read mutable runtime state
-acquire resources
-inspect current physical generations
-dispatch Messages
-```
-
-They describe desire.
-
-They do not perform reconciliation.
-
----
-
-## 15. Root `one` binding
-
-Example:
-
-```ts
-session:
-  bind.one(
-    Editor.Session,
-
-    model =>
-      model.session.pipe(
-        Option.map(
-          session =>
-            session.userId
-        )
-      )
-  )
-```
-
-Meaning:
-
-```text
-Some("alice")
-→ Session[alice] desired
-
-None
-→ Session absent
-```
-
----
-
-## 16. Owner-relative `one` binding
-
-A child selector receives the semantic key of the desired owner instance.
-
-Conceptually:
-
-```ts
-workspace:
-  bind.one(
-    Editor.Workspace,
-
-    (
-      model,
-      userId
-    ) =>
-      workspaceFor(
-        model,
-        userId
-      )
-  )
-```
-
-The selector does not receive:
-
-```text
-Scope
-live owner object
-physical generation
-runtime service
-```
-
-It receives stable desired identity.
-
----
-
-## 17. `many` binding
-
-Collection families use `bind.many`.
-
-Example:
-
-```ts
-documents:
-  bind.many(
-    Editor.Document,
-
-    (
-      model,
-      workspaceId
-    ) =>
-      documentsFor(
-        model,
-        workspaceId
-      )
-  )
-```
-
-If the selector returns:
-
-```text
-foo
-bar
-baz
-```
-
-then three independently keyed Document lifetimes are desired beneath that Workspace.
-
----
-
-## 18. Per-owner evaluation
-
-Bindings are evaluated relative to desired owners.
-
-A child selector is logically evaluated once for each relevant desired owner identity.
-
-This means desired instance identity is owner-relative.
-
----
-
-## 19. Semantic identity
-
-A live lifetime's semantic identity is defined by:
-
-```text
-lifetime handle
-+
-semantic key
-+
-owner semantic path
-```
-
-Physical runtime generations are distinct from semantic identity.
-
-For example:
-
-```text
-Session[alice]
-└── Workspace[acme]
-```
-
-and:
-
-```text
-Session[bob]
-└── Workspace[acme]
-```
-
-represent different Workspace instances even though the Workspace key is the same.
-
----
-
-## 20. Key equality
-
-Each definition provides explicit semantic key equality.
-
-Conceptually:
-
-```ts
-key:
-  Key.string
-```
-
-or:
-
-```ts
-key:
-  Key.struct({
-    uri:
-      Key.string,
-
-    version:
-      Key.number
-  })
-```
-
-The rule is:
-
-> **A value belongs in the semantic key only when changing it should replace that lifetime for semantic runtime reasons.**
-
-JavaScript object reference equality is not sufficient unless explicitly selected.
-
----
-
-## 21. Equivalent state commits
-
-If a new state produces semantically equivalent desired instances:
-
-```text
-before:
-Session[alice]
-
-after:
-Session[alice]
-```
-
-the runtime must retain the existing physical lifetime.
-
-Equivalent commits must not create synthetic restart churn.
-
----
-
-## 22. Lifetime ownership
-
-Every definition has exactly one lifetime owner:
-
-```text
-root
-or
-another lifetime family
-```
-
-Ownership means:
-
-> **The child may never outlive the physical owner instance beneath which it was admitted.**
-
-Conceptually:
-
-```text
-Session
-└── Workspace
-    └── Document
-```
-
-If Session becomes obsolete:
-
-```text
-Session
-Workspace
-Document
-```
-
-all become obsolete structurally.
-
----
-
-## 23. Ownership is not dependency
-
-Lifetime ownership must not be used merely to gain access to a service.
-
-Example:
-
-```text
-Workspace
-├── Language
-└── Document
-    └── Diagnostics
-```
-
-If Diagnostics also requires Settings:
-
-```text
-Settings ─────────► Diagnostics
-Language ─────────► Diagnostics
-```
-
-Settings should not become an ancestor merely to supply its capability.
-
-Therefore `effect-reconciler` internally maintains two separate relations:
-
-```text
-lifetime ownership tree
-+
-capability dependency DAG
-```
-
----
-
-## 24. Capability requirements
-
-A lifetime may require capabilities provided by other lifetime families.
-
-Requirements are declared statically and named.
-
-Example:
-
-```ts
-requires: {
-  settings:
-    Settings,
-
-  language:
-    Language
-}
-```
-
-Named requirements avoid positional APIs and permit additive evolution.
-
----
-
-## 25. Provider resolution
-
-Each requirement must resolve unambiguously for a desired/live instance.
-
-The runtime must never arbitrarily choose between multiple possible providers.
-
-v0 should favor explicit provider handles and owner-relative lookup rules.
-
-Ambiguous definitions are invalid.
-
----
-
-## 26. Capability graph
-
-Capability dependencies may form a DAG.
-
-Example:
-
-```text
-Settings ────────────────┐
-                         ▼
-Language ───────────► Diagnostics
-                         ▲
-Workspace ───────────────┘
-```
-
-They must not form an unresolved cycle.
-
-Invalid:
-
-```text
-A requires B
-B requires C
-C requires A
-```
-
-Such cycles are rejected when the Definition is compiled.
-
----
-
-## 27. Startup
-
-A desired lifetime does not become available immediately.
-
-Conceptually:
-
-```text
-desired
-  ↓
-owner ready?
-  ↓
-providers ready?
-  ↓
-create Scope
-  ↓
-Starting
-  ↓
-run start
-  ↓
-publish provided capabilities
-  ↓
-Running
-```
-
-Only Running lifetimes may:
-
-```text
-satisfy requirements
-admit children
-```
-
----
-
-## 28. Startup environment
-
-Startup executes against one immutable capability snapshot derived from:
-
-```text
-owner capabilities
-+
-required provider capabilities
-+
-root environment
-```
-
-The exact API may expose this through:
-
-```text
-Effect environment
-typed startup context
-or both
-```
-
-but the semantic contract is fixed.
-
-A lifetime never dynamically rebinds to a different provider generation while remaining physically alive.
-
----
-
-## 29. Provided capabilities
-
-A lifetime may provide capabilities to:
-
-```text
-its children
-explicit dependents
-```
-
-Conceptually the startup Effect produces:
-
-```ts
-Context.Context<ROut>
-```
-
-or an equivalent opaque service bundle.
-
-The stable API should describe:
-
-> this lifetime provides capabilities `ROut`
-
-rather than expose internal `Runtime.Runtime` objects.
-
----
-
-## 30. Provider-generation safety
-
-Each physical dependent instance is bound to exact physical provider instances.
-
-Conceptually:
-
-```text
-Diagnostics[foo]
-
-bound to:
-  Settings(old)
-  Language(ts-old)
-```
-
-If Language is replaced:
-
-```text
-Language(ts-old)
-→ obsolete
-
-Language(py-new)
-→ Running
-```
-
-the existing Diagnostics instance does not silently switch provider.
-
-Instead:
-
-```text
-Diagnostics(old)
-→ obsolete
-
-Diagnostics(new)
-→ start against py-new
-```
-
----
-
-## 31. Environment isolation
-
-Overlapping physical generations may coexist during finalization.
-
-Example:
-
-```text
-Session[alice] old   STOPPING
-Session[bob] new     RUNNING
-```
-
-The runtime must guarantee:
-
-```text
-Bob descendants
-never receive Alice services
-```
-
-Likewise, a dependent requiring several providers must receive one internally consistent captured provider set.
-
-Cross-generation capability mixing is forbidden.
-
----
-
-## 32. No implicit rebinding
-
-Forbidden:
-
-```text
-Diagnostics running with Settings A
-
-Settings B becomes Running
-
-mutate Diagnostics runtime
-to point at Settings B
-```
-
-Required:
-
-```text
-Diagnostics old
-→ obsolete
-
-Diagnostics new
-→ startup against Settings B
-```
-
-This keeps capability relationships:
-
-```text
-immutable
-observable
-testable
-race-resistant
-```
-
----
-
-## 33. Physical generations
-
-The Controller uses physical generation identity internally.
-
-Example:
-
-```text
-Workspace[acme] old
-Workspace[acme] replacement
-```
-
-may represent two different physical lifetimes despite equal semantic keys if replacement was caused by a provider binding change.
-
-Generation identities are internal.
-
-Stable public APIs must not expose numerical generation counters.
-
----
-
-## 34. Runtime validity
-
-A physical lifetime remains valid only while:
-
-```text
-its semantic desire remains current
-AND
-its physical owner remains current
-AND
-all bound provider instances remain current
-```
-
-If any condition fails:
-
-```text
-lifetime
-→ obsolete
-→ Stopping
-```
-
----
-
-## 35. Obsolescence
-
-Once obsolete, a physical lifetime:
-
-```text
-may not admit new children
-may not admit new reconciler-owned work
-may not satisfy new dependents
-loses readiness authority
-begins Scope closure
-invalidates dependent bindings
-```
-
-If still Starting, startup is interrupted.
-
-Physical finalization may continue asynchronously.
-
----
-
-## 36. Late startup completion
-
-If startup completes after its lifetime became obsolete:
-
-```text
-late success
-```
-
-must not:
-
-```text
-publish capabilities
-become Running
-admit children
-satisfy requirements
-resurrect the old lifetime
-```
-
-The result is discarded and its Scope continues closing.
-
----
-
-## 37. Lifecycle
-
-The stable observable lifecycle is approximately:
-
-```text
-Starting
-Running
-Stopping
-Failed
-```
-
-A lifetime may transition:
-
-```text
-Starting
-  ├──► Running
-  ├──► Failed
-  └──► Stopping
-```
-
-and:
-
-```text
-Running
-  └──► Stopping
-```
-
-Physical absence after finalization need not be represented as a durable public state.
-
----
-
-## 38. Startup failure
-
-Startup failure is a normal runtime condition.
-
-It is not a Controller defect.
-
-If startup fails:
-
-```text
-no children start
-no dependents bind
-partial resources finalize
-failure becomes inspectable
-```
-
-A future retry creates another physical instance — explicitly, through
-`Controller.retry` (§93), never by recommitting the same state.
-
-Advanced supervision policies are deferred.
-
----
-
-## 39. Replacement policy
-
-Definitions declare an extensible replacement policy.
-
-v0 supports:
-
-```text
-Sequential
-Overlap
-```
-
-through constructors such as:
-
-```ts
-Replacement.sequential()
+Replacement.sequential()   // default
 Replacement.overlap()
 ```
 
-not bare string enums.
+Their semantics are §7.
 
----
+### 3.6 Validation at creation
 
-## 40. Sequential replacement
+`Reconciler.make` compiles and validates the Definition and the Binding, and
+fails with tagged errors (§10) for unknown owners, unknown requirements,
+ownership cycles, capability cycles, ambiguous or unresolvable providers, and
+handles belonging to another Definition. After a successful compile, internal
+reconciliation trusts these invariants.
 
-Sequential replacement means:
+## 4. Binding
 
-```text
-old lifetime obsolete
-       ↓
-begin shutdown
-       ↓
-required finalization boundary reached
-       ↓
-re-read latest desire
-       ↓
-start latest replacement
-```
+A Binding maps one control-state type into desired instances of a Definition.
 
-Use for:
+### 4.1 Selectors are pure
 
-```text
-exclusive devices
-locks
-single-writer resources
-resources that cannot overlap safely
-```
+Selectors receive state and a desired owner reference and return desired keys.
+They must not run Effects, read mutable runtime state, acquire resources,
+inspect physical generations or dispatch messages. They describe desire; they
+do not reconcile.
 
----
-
-## 41. Overlap replacement
-
-Overlap means:
-
-```text
-old lifetime
-→ Stopping
-
-new desired lifetime
-→ may start immediately
-```
-
-Use for:
-
-```text
-independent sessions
-subscriptions
-search runtimes
-non-exclusive workers
-replaceable service clients
-```
-
-Physical overlap does not weaken capability-generation isolation.
-
----
-
-## 42. Latest-state coalescing
-
-Suppose:
-
-```text
-Workspace[A] Running
-```
-
-then state commits desire:
-
-```text
-B
-```
-
-while A is stopping, another commit desires:
-
-```text
-C
-```
-
-When sequential replacement becomes possible:
-
-```text
-start C
-```
-
-not necessarily:
-
-```text
-start B
-then stop B
-then start C
-```
-
-The runtime continuously reconciles toward the latest committed state.
-
-Intermediate desired states need not become physical runtimes.
-
----
-
-## 43. Binding evaluation model
-
-A state commit produces one coherent desired snapshot.
-
-Conceptually:
-
-```text
-commit(state)
-     ↓
-evaluate Binding
-     ↓
-desired instance snapshot
-     ↓
-atomic publication
-```
-
-Selectors for one commit must not observe different versions of application state.
-
-This is particularly important for MVU integration.
-
----
-
-## 44. Controller creation
-
-A Binding produces a runnable configuration.
-
-Conceptually:
+### 4.2 Root, owned and many selectors
 
 ```ts
-const BoundEditor =
-  Editor.bind<Model>(...)
-
-const controller =
-  yield* Reconciler.make(
-    BoundEditor
-  )
+session:   bind.one(Editor.Session, (model) => model.user),
+workspace: bind.one(Editor.Workspace, (model, owner) =>
+             model.workspacesByUser[owner.key]),
+documents: bind.many(Editor.Document, (model, owner) =>
+             model.openDocuments[owner.key])
 ```
 
-The exact constructor syntax remains provisional.
+An owned selector receives the semantic owner reference (§5.2) — its key and
+its own owner up to the root — not a Scope, a live object, a physical
+generation or a runtime service. Selectors are evaluated once per relevant
+desired owner identity, which is what makes desired identity owner-relative.
 
-Creation compiles and validates the static Definition and Binding.
+A commit produces one coherent desired snapshot: selectors within a commit
+never observe different versions of the state.
 
----
+### 4.3 Validation
 
-## 45. Validation boundary: Definition
+TypeScript rejects most binding mistakes before runtime: a `one` handle used
+with `bind.many` and the reverse, wrong key types, an owner-relative selector
+typed against the wrong owner, a foreign handle, a missing or duplicated
+binding. What can only be discovered dynamically — duplicate equal keys from a
+`many` selector, an invalid selector result, a selector that throws — fails the
+commit and leaves the previous desire authoritative (§8.2, §10).
 
-Creation validates structural invariants such as:
+### 4.4 Reuse across control planes
+
+> Static Effect architecture must be reusable independently of control-state
+> representation.
+
+One Definition binds to a Foldkit Model, to a daemon's config and to a test
+fixture, reusing the same ownership, requirements, startup Effects, replacement
+policies and key semantics. Only the selectors change. This is the reason
+selectors do not live on the family definitions.
+
+### 4.5 Worked example
+
+The editor topology, which exercises root `one`, nested `one`, nested `many`, a
+non-ancestral provider, and both replacement policies:
 
 ```text
-unknown owners
-unknown requirements
-ownership cycles
-capability cycles
-ambiguous providers
-invalid cardinality relationships
-illegal definition reuse
+Application
+├── Settings
+└── Session
+    └── Workspace
+        ├── Language
+        └── Document × N
+            └── Diagnostics
+
+Settings ──────┐
+Language ──────┼──► Diagnostics
+Workspace ─────┘
 ```
-
-Once compiled successfully, internal reconciliation trusts these invariants.
-
----
-
-## 46. Validation boundary: Binding
-
-Binding compilation validates as much as possible statically or during creation:
-
-```text
-every binding references a definition in this Reconciler
-one definitions use bind.one
-many definitions use bind.many
-binding keys match definition key types
-owner-relative selectors match owner key types
-```
-
-TypeScript should reject most of these before runtime.
-
----
-
-## 47. Runtime desired-state validation
-
-A `commit(state)` may still discover dynamic invalidity such as:
-
-```text
-duplicate equal keys from a many selector
-invalid selector result
-```
-
-If dynamic validation fails, the new desired snapshot must not become authoritative.
-
----
-
-## 48. Commit API
-
-The stable mutation boundary is:
 
 ```ts
-controller.commit(state)
+const Editor = Reconciler.define((define) => {
+  const Settings = define.one("Settings", {
+    start: (revision: number) => SettingsRuntime.open(revision)
+  })
+  const Session = define.one("Session", {
+    replacement: Replacement.overlap(),
+    start: (userId: string) => SessionRuntime.open(userId)
+  })
+  const Workspace = define.one("Workspace", {
+    owner: Session,
+    start: (workspaceId: string) => WorkspaceRuntime.open(workspaceId)
+  })
+  const Language = define.one("Language", {
+    owner: Workspace,
+    start: (language: string) => LanguageRuntime.open(language)
+  })
+  const Document = define.many("Document", {
+    owner: Workspace,
+    start: (uri: string) => DocumentRuntime.open(uri)
+  })
+  const Diagnostics = define.one("Diagnostics", {
+    owner: Document,
+    requires: { settings: Settings, language: Language },
+    start: (_: null) => DiagnosticsRuntime.open
+  })
+  return { Settings, Session, Workspace, Language, Document, Diagnostics }
+})
 ```
 
-Conceptually:
+`examples/editor.ts` binds this Definition to a Foldkit-style `Model` and to a
+daemon `Config` without changing it.
+
+## 5. Identity
+
+### 5.1 Semantic identity
+
+A lifetime's semantic identity is
+
+```text
+family handle + semantic key + owner semantic path
+```
+
+so `Session[alice] → Workspace[acme]` and `Session[bob] → Workspace[acme]` are
+different Workspaces despite the equal key.
+
+### 5.2 LifetimeRef
+
+Every semantic API speaks this one vocabulary:
 
 ```ts
-interface Controller<State> {
-  readonly commit:
-    (
-      state: State
-    ) => Effect.Effect<
-      void,
-      CommitError
-    >
-
-  readonly snapshot:
-    Effect.Effect<
-      ReconcilerSnapshot
-    >
-
-  readonly shutdown:
-    Effect.Effect<void>
+interface LifetimeRef<H> {
+  readonly family: H
+  readonly key: KeyOf<H>
+  readonly parent: OwnerOf<H> // a LifetimeRef, or null at the root
 }
 ```
 
----
-
-## 49. Commit semantics
-
-`commit(state)` means:
-
-> **Evaluate the Binding against `state` and atomically replace the Controller's authoritative desired instance snapshot.**
-
-A successful commit guarantees:
-
-```text
-the new desired snapshot became authoritative
-```
-
-It does not guarantee:
-
-```text
-resources have started
-resources have stopped
-the physical runtime has converged
-```
-
----
-
-## 50. Commit atomicity
-
-Commit has no ambiguous publication outcome.
-
-```text
-commit succeeds
-⇒ new desire definitely published
-
-commit fails
-⇒ new desire definitely not published
-```
-
-The desired-state publication point should be a small atomic/uninterruptible critical section.
-
-Resource lifecycle work remains asynchronous and interruptible.
-
----
-
-## 51. Commit latency
-
-`commit` must not await:
-
-```text
-resource startup
-resource shutdown
-finalizers
-replacement completion
-provider readiness
-retry
-full reconciliation
-```
-
-Therefore:
-
-```text
-control-state latency
-≠
-resource convergence latency
-```
-
----
-
-## 52. Equivalent commits
-
-If two committed states produce equivalent desired snapshots:
-
-```text
-commit(state1)
-commit(state2)
-```
-
-then no lifecycle churn should occur merely because the state object itself changed.
-
-Desired equality is semantic.
-
-It is derived from:
-
-```text
-definition structure
-owner-relative identity
-key equivalence
-```
-
----
-
-## 53. Concurrent commits
-
-Concurrent commits are linearized.
-
-Example:
-
-```text
-Fiber A → commit(A)
-Fiber B → commit(B)
-```
-
-The Controller establishes one total publication order.
-
-The last successfully linearized commit becomes authoritative.
-
-The API does not promise which unsynchronized caller wins.
-
-Callers needing domain ordering should serialize their control-state updates.
-
----
-
-## 54. Commit errors
-
-Conceptually:
-
-```ts
-type CommitError =
-  | {
-      readonly _tag:
-        "ControllerClosed"
-    }
-
-  | {
-      readonly _tag:
-        "InvalidDesiredState"
-      readonly reason:
-        InvalidDesiredStateReason
-    }
-```
-
-Lifetime startup failures do not cause `commit` itself to fail.
-
----
-
-## 55. Shutdown
-
-`shutdown` is idempotent.
-
-```text
-shutdown
-shutdown again
-→ success
-```
-
-Shutdown:
-
-```text
-stop accepting commits
-        ↓
-invalidate all desire
-        ↓
-mark all live lifetimes obsolete
-        ↓
-close root Scope
-        ↓
-await structured finalization
-```
-
-After shutdown:
-
-```text
-commit(...)
-→ ControllerClosed
-```
-
----
-
-## 56. Snapshot
-
-The stable Controller may expose a read-only snapshot for inspection.
-
-Conceptually:
-
-```ts
-interface ReconcilerSnapshot {
-  readonly roots:
-    ReadonlyArray<
-      LifetimeSnapshot
-    >
-}
-```
-
-A lifetime snapshot may expose:
-
-```text
-definition handle
-semantic key
-status
-children
-```
-
-It should not expose:
-
-```text
-Scope
-Fiber
-Runtime
-mutable maps
-physical generation counters
-reconcile revisions
-internal provider indexes
-```
-
----
-
-## 57. Diagnostic boundary
-
-Detailed runtime events are useful but should not define the stable application API.
-
-An experimental diagnostic API may expose:
-
-```text
-physical instance identity
-startup timing
-replacement reason
-provider invalidation
-coalescing
-internal desired revision
-finalization timing
-```
-
-Conceptually:
-
-```ts
-ReconcilerDiagnostics.observe(
-  controller
-)
-```
-
-rather than making a detailed event stream part of the minimal stable Controller contract.
-
----
-
-## 58. Hyrum's Law boundary
-
-The implementation must avoid accidentally promising:
-
-```text
-exact sibling startup ordering
-exact sibling shutdown ordering
-exact reconciliation traversal
-numerical generation identity
-one physical generation per commit
-one event per internal transition
-specific diagnostic event ordering
-```
-
-These are implementation details unless explicitly documented.
-
----
-
-## 59. Non-guarantees
-
-Unless explicitly stated otherwise, the runtime does not guarantee:
-
-```text
-sibling startup ordering
-sibling shutdown ordering
-wall-clock convergence deadlines
-fair scheduling among unrelated lifetimes
-materialization of every intermediate desired state
-stable internal generation numbers
-stable reconciliation revision numbers
-global finalizer ordering beyond Scope semantics
-```
-
----
-
-## 60. Root services
-
-The Controller may itself require a static root Effect environment.
-
-Example:
-
-```text
-Logger
-Clock
-Filesystem
-Platform services
-```
-
-These services live for the Controller's root Scope.
-
-They need not become reconciled lifetime definitions merely because dynamic lifetimes use them.
-
----
-
-## 61. Dynamic versus root capabilities
-
-Use normal static Effect Layers for:
-
-```text
-application-lifetime infrastructure
-```
-
-Use reconciled lifetime definitions when:
-
-```text
-resource existence or identity changes dynamically
-according to committed control state
-```
-
-`effect-reconciler` should complement Layer rather than replace it.
-
----
-
-## 62. Relationship to RcMap and LayerMap
-
-`RcMap` and `LayerMap` solve keyed resource acquisition and sharing.
-
-Conceptually:
-
-```text
-reference
-   ↓
-keyed resource lifetime
-```
-
-`effect-reconciler` solves:
-
-```text
-control-state desire
-        ↓
-keyed resource lifetime
-```
-
-The distinction is:
-
-```text
-RcMap / LayerMap:
-resource exists while referenced
-
-effect-reconciler:
-resource exists while desired and admissible
-```
-
-The implementation may internally use `RcMap`, `LayerMap`, or lower-level Scopes where appropriate.
-
-The public abstraction must not duplicate their functionality unnecessarily.
-
----
-
-## 63. Relationship to direct Effect
-
-Everything `effect-reconciler` does should remain expressible manually using:
-
-```text
-Scope
-Context
-Layer
-RcMap
-LayerMap
-Fiber
-Ref
-Stream
-```
-
-That is intentional.
-
-The package earns its existence only if it materially reduces:
-
-```text
-application lifecycle predicates
-manual owner tracking
-readiness coordination
-provider invalidation code
-race-condition tests
-replacement bookkeeping
-```
-
-It is a coordination abstraction, not a new primitive execution capability.
-
----
-
-## 64. Relationship to Foldkit
-
-Foldkit is a particularly natural control plane.
-
-Foldkit already provides:
-
-```text
-Message
-  ↓
-pure update
-  ↓
-committed Model
-```
-
-Integration becomes:
-
-```text
-Message
-  ↓
-update
-  ↓
-Committed Model
-  │
-  ├────────► View
-  │
-  ├────────► Commands
-  │
-  └────────► controller.commit(model)
-```
-
-No separate `ProcessSpec` abstraction is required if the Foldkit application uses a `Binding<Model>`.
-
----
-
-## 65. Foldkit integration contract
-
-The Foldkit adapter must guarantee:
-
-> **Only committed Models are passed to the Reconciler, and they are committed in the same serialized order as Foldkit Model transitions.**
-
-Runtime convergence is asynchronous.
-
-Foldkit's Message loop must not await resource convergence.
-
----
-
-## 66. Event versus state causality
-
-The earlier Command/Process distinction remains useful even though `Process` is no longer required as public vocabulary.
-
-### Command
-
-```text
-Because event X happened,
-run this finite Effect.
-```
-
-### Reconciled lifetime
-
-```text
-While current committed state desires identity X,
-maintain this Effect lifetime.
-```
-
-Therefore:
-
-```text
-event causality
-→ Command
-
-state causality
-→ Reconciler
-```
-
----
-
-## 67. Foldkit stale outputs
-
-Cancellation cannot retract a Message already emitted.
-
-Example:
-
-```text
-Diagnostics computes result
-        ↓
-dispatch Message
-        ↓
-Message queued
-        ↓
-Diagnostics becomes obsolete
-```
-
-Reducer-level identity/version validation remains required.
-
-Rule:
-
-> **Reconciler generation safety protects runtime execution; reducer validation protects committed domain state.**
-
----
-
-## 68. Runtime status versus Foldkit Model
-
-The Controller may know:
-
-```text
-Starting
-Running
-Stopping
-Failed
-```
-
-Foldkit View should not implicitly treat that runtime status as authoritative application state.
-
-If application/UI semantics require:
-
-```text
-WorkspaceReady
-ConnectionFailed
-LanguageServerUnavailable
-```
-
-the lifetime should emit a semantic Message.
-
-Then:
-
-```text
-Message
-→ update
-→ Model
-→ View
-```
-
-remains authoritative.
-
----
-
-## 69. Reuse across control planes
-
-One of the defining requirements of `effect-reconciler` is:
-
-> **Static Effect architecture must be reusable independently of control-state representation.**
-
-Example:
-
-```text
-Editor Definition
-      │
-      ├── bind<Model>
-      │
-      └── bind<DaemonConfig>
-```
-
-Both bindings must reuse:
-
-```text
-same owner relationships
-same requirement graph
-same startup Effects
-same replacement policies
-same key semantics
-```
-
-Only desired-state selectors change.
-
----
-
-## 70. Nested Reconcilers
-
-A reconciled lifetime may host a child Reconciler.
-
-Example:
-
-```text
-Application Reconciler
-└── Workspace lifetime
-    └── Plugin host
-        └── Plugin Reconciler
-```
-
-The parent Scope owns the nested Controller's lifetime.
-
-The system does not require one global Reconciler or one global control-state type.
-
----
-
-## 71. Performance architecture
-
-The naïve implementation:
-
-```text
-commit state
-   ↓
-evaluate every binding
-   ↓
-walk every definition
-```
-
-is semantically valid but not the intended optimized runtime.
-
-The compiled Definition should permit indexes such as:
-
-```text
-owner → children
-provider → dependents
-definition → live slots
-```
-
-Bindings may later support incremental selector invalidation.
-
-Correctness must not depend on these optimizations.
-
----
-
-## 72. Reverse dependency index
-
-Provider replacement should invalidate only known dependents.
-
-Conceptually:
-
-```text
-Settings replaced
-       │
-       ▼
-dependents(Settings)
-       │
-       ├── Diagnostics[foo]
-       └── Diagnostics[bar]
-```
-
-The runtime should not globally rescan unrelated resource families merely because one provider changed.
-
----
-
-## 73. Binding optimization
-
-A Binding implementation may eventually track which selectors are affected by a state transition.
-
-Foldkit may be especially well positioned to exploit this.
-
-The optimized path may become:
-
-```text
-Model commit
-    ↓
-affected bindings
-    ↓
-changed desired identities
-    ↓
-Reconciler work queue
-```
-
-rather than full reevaluation.
-
-This is an optimization layer.
-
-The semantic contract remains full-snapshot-equivalent.
-
----
-
-## 74. Failure of providers
-
-If a required provider fails to start:
-
-```text
-Language
-→ Failed
-```
-
-a dependent such as Diagnostics:
-
-```text
-remains unadmitted
-```
-
-It must not start with:
-
-```text
-missing provider
-stale provider
-partially initialized provider
-```
-
-If a valid replacement later becomes Running, the latest desired dependent may then start.
-
----
-
-## 75. Replacement caused by provider change
-
-A lifetime may be replaced even when its semantic key remains unchanged.
-
-Example:
-
-```text
-Diagnostics[foo]
-```
-
-remains semantically desired.
-
-But:
-
-```text
-Settings old
-→ Settings new
-```
-
-invalidates Diagnostics' provider binding.
-
-Therefore:
-
-```text
-Diagnostics physical instance old
-→ obsolete
-
-Diagnostics physical instance new
-→ same semantic key
-→ new provider binding
-```
-
-This is why physical generations are distinct from semantic identity.
-
----
-
-## 76. Startup cancellation
-
-If desired state changes while startup is in progress:
-
-```text
-Starting A
-```
-
-and A becomes obsolete:
-
-```text
-close A Scope
-→ interrupt startup
-```
-
-A stale startup completion must not regain authority.
-
-This applies to obsolescence caused by:
-
-```text
-semantic key change
-owner invalidation
-provider invalidation
-shutdown
-```
-
----
-
-## 77. Admission invariant
+The family handle — not its label — is the identity, since two families may
+share a display name. The ownership chain is type-checked, so a reference
+cannot name a lifetime the Definition could not produce. References are built
+with `Reconciler.ref`, arrive with every failure, and are what `status` and
+`retry` take. An owned selector receives one as its owner argument, which is
+what lets it distinguish two identical direct-owner keys under different
+ancestors.
+
+### 5.3 Physical generations
+
+A physical generation is the running instance behind a semantic identity. Two
+generations may share a semantic key — the second admitted because a provider
+binding changed (§7.4) — and both may briefly exist while one finalizes.
+Generation identity is internal: no public API exposes it, and no numeric
+generation counter is part of the contract.
+
+### 5.4 Definition identity
+
+A Definition's identity is a per-call object compared by reference; a family's
+identity is its handle object. Neither is a name nor a numeric index, so
+handles cannot be confused across Definitions that declare families in the same
+order, nor across two duplicate installed copies of the package. Numeric family
+ids exist internally, as indexes within one Definition.
+
+## 6. Lifecycle
+
+### 6.1 Admission
 
 A new physical lifetime may be admitted only if, at the admission point:
 
@@ -2253,623 +335,229 @@ all required providers are still current and Running
 the Controller is still open
 ```
 
-If any condition fails, admission is abandoned.
+If any condition fails, admission is abandoned. Only Running lifetimes satisfy
+requirements or admit children.
 
----
-
-## 78. Ownership closure invariant
-
-If an owner becomes obsolete:
+### 6.2 Startup
 
 ```text
-all physical descendants become obsolete
+desired → owner ready → providers ready → create Scope → Starting
+        → run start → publish capabilities → Running
 ```
 
-without requiring each child Binding selector to independently express the ancestor condition.
+`start` is ordinary Effect. Its Scope is the instance's own, so
+`acquireRelease` and `addFinalizer` are tied to the lifetime. Transient retry
+inside `start` — `Effect.retry` with a schedule — is invisible to the runtime
+and stays one physical generation; only ultimate failure produces `Failed`.
 
-This removes duplicated predicates such as:
+Startup environments are typed. Whatever `start` needs beyond its own Scope,
+its ancestors' published capabilities and its required providers' capabilities
+is a root-environment requirement, and surfaces on `Reconciler.make`'s
+requirement channel — so an unmet capability is a compile error rather than a
+runtime miss. Root services (a Logger, a Clock, a Filesystem) live for the
+Controller's root Scope and need not become reconciled families merely because
+dynamic lifetimes use them. Use ordinary static Layers for
+application-lifetime infrastructure and reconciled families when existence or
+identity changes with committed state.
+
+### 6.3 Capabilities and generation isolation
+
+A `start` Effect that returns a `Context.Context` publishes it to that
+lifetime's children and to its declared dependents. Startup executes against
+one immutable capability snapshot — owner capabilities, required provider
+capabilities, root environment — captured at admission.
+
+A dependent therefore receives one internally consistent provider set, and
+**never rebinds**: a live lifetime is not mutated to point at a newer provider
+generation. When a provider is superseded, its dependents are structurally
+replaced instead (§7.4, §13.5). Overlapping generations may coexist while one
+finalizes, and cross-generation mixing is forbidden: descendants of the new
+Session never receive the old Session's services.
+
+### 6.4 States
 
 ```text
-if session exists
-AND workspace exists
-AND document exists
-...
+Starting ──► Running ──► Stopping
+   ├──────► Failed
+   └──────► Stopping
 ```
 
-from application code.
+Physical absence after finalization is not a durable public state (§9.1).
 
-Lifetime dominance is structural.
+### 6.5 Obsolescence and late completion
 
----
+A physical lifetime stays valid only while its semantic desire, its physical
+owner and every bound provider instance remain current. When any of those
+fails, it becomes obsolete: it admits no new children or reconciler-owned work,
+satisfies no new dependents, loses readiness authority, begins Scope closure
+and invalidates its dependents' bindings. If it was still Starting, startup is
+interrupted. Finalization then proceeds asynchronously.
 
-## 79. Dependency invalidation invariant
+Startup that completes after its lifetime became obsolete must not publish
+capabilities, become Running, admit children, satisfy requirements or resurrect
+the lifetime. The result is discarded and the Scope continues closing. This
+applies to obsolescence from a key change, owner invalidation, provider
+invalidation and shutdown alike.
 
-If a provider binding becomes invalid:
+### 6.6 Startup failure and the failed slot
+
+Startup failure is a normal runtime condition, not a Controller defect. No
+children start, no dependents bind, partially acquired resources finalize, and
+the failure becomes observable (§9).
+
+The failed generation is not discarded: it **holds its slot**, in `Failed`,
+with its cause. That is what stops the runtime spinning on a failing resource,
+and what makes "still broken" distinguishable from "not started yet". The slot
+is released when desire changes, or when `Controller.retry` retires the
+generation (§9.3). It also means recommitting the same state is
+lifecycle-idempotent, and therefore never an implicit retry.
+
+## 7. Replacement
+
+### 7.1 Sequential
 
 ```text
-all currently bound dependents become obsolete
+obsolete → begin shutdown → finalization boundary reached
+         → re-read latest desire → start latest replacement
 ```
 
-without invalidating unrelated owners.
+The default. Use it for exclusive devices, locks, single-writer resources and
+anything that cannot safely overlap. Under sequential replacement a failed
+generation's cleanup also completes before another attempt is admitted, so a
+partially acquired exclusive resource is released first.
 
-Example:
+### 7.2 Overlap
+
+The old lifetime moves to Stopping and the new one may start immediately. Use
+it for independent sessions, subscriptions, search runtimes, non-exclusive
+workers and replaceable clients. Physical overlap never weakens
+capability-generation isolation (§6.3).
+
+### 7.3 Latest-state coalescing
+
+If `A` is Running and state desires `B`, then `C` before `B` can start, the
+runtime starts `C`. It converges toward the latest committed state;
+intermediate desired states need not become physical runtimes.
+
+### 7.4 Replacement caused by a provider
+
+A lifetime may be replaced while its semantic key is unchanged. If
+`Diagnostics[foo]` is still desired but Settings is replaced, the old
+Diagnostics generation becomes obsolete and a new one starts against the new
+Settings. This is exactly why physical generations are distinct from semantic
+identity.
+
+If a required provider fails to start, its dependents stay unadmitted — never
+started with a missing, stale or partially initialized provider — until a valid
+replacement becomes Running.
+
+## 8. Commit and shutdown
+
+### 8.1 Commit semantics
+
+> `commit(state)` evaluates the Binding against `state` and atomically replaces
+> the Controller's authoritative desired snapshot.
+
+A successful commit guarantees that the new desire became authoritative. It
+guarantees nothing about resources having started or stopped.
+
+### 8.2 Atomicity and linearization
+
+Publication has no ambiguous outcome:
 
 ```text
-Settings changes
+commit returns   ⇒ the new desire is published, exactly once
+commit fails     ⇒ nothing is published; the previous desire stays authoritative
+commit interrupted before its publication point ⇒ nothing is published
 ```
 
-may replace:
+The publication point is a small uninterruptible critical section; lifecycle
+work outside it stays asynchronous and interruptible, and an interrupted commit
+never wedges it. Concurrent commits are linearized into one total publication
+order, and the last one to linearize wins. The API does not promise which
+unsynchronized caller that is; callers needing domain ordering serialize their
+own state updates.
+
+### 8.3 Latency
+
+`commit` never awaits startup, shutdown, finalizers, replacement, provider
+readiness, retry or convergence. Control-state latency is not resource
+convergence latency.
+
+### 8.4 Equivalent commits
+
+If two states produce equivalent desired snapshots, no lifecycle churn occurs
+merely because the state object changed. Equivalence is semantic — definition
+structure, owner-relative identity, key equality — not reference equality.
+
+### 8.5 Commit errors
 
 ```text
-Diagnostics
+CommitError = ControllerClosed | InvalidDesiredState(reason)
 ```
 
-while retaining:
+Lifetime startup failures never fail `commit` itself.
 
-```text
-Document
-Workspace
-Language
-```
+### 8.6 Shutdown
 
-unless they independently depend on Settings.
+`shutdown` stops accepting commits, invalidates all desire, marks every live
+lifetime obsolete, closes the root Scope and awaits structured finalization. It
+interrupts startups in flight and is idempotent. Closing the Controller's own
+Scope shuts it down the same way. After shutdown, `commit` fails with
+`ControllerClosed`.
 
----
-
-## 80. Required v0 correctness suite
-
-The initial implementation must prove:
-
-```text
-equal keys retain physical lifetimes
-changed keys replace lifetimes
-one cardinality admits at most one key per owner
-many cardinality reconciles keys independently
-owner replacement closes all descendants
-provider replacement invalidates dependents only
-provider failure prevents dependent admission
-startup is interruptible
-late startup cannot resurrect obsolete lifetime
-old/new provider generations never mix
-sequential replacement preserves exclusivity
-overlap replacement permits safe coexistence
-latest desired identity supersedes intermediate replacements
-equivalent commits create no lifecycle churn
-commits linearize
-successful commit definitely publishes desire
-failed commit definitely does not publish desire
-commit does not await lifecycle convergence
-shutdown is idempotent
-commit after shutdown fails
-same Definition can bind to multiple state types
-```
-
----
-
-## 81. Benchmark acceptance criteria
-
-`effect-reconciler` should continue only if realistic applications show material reduction in coordination burden relative to direct Effect.
-
-Evaluation should compare:
-
-```text
-application orchestration LOC
-manual lifecycle predicates
-manual cancellation rules
-manual provider invalidation
-manual readiness state
-race-condition tests
-runtime overhead
-selector work
-debugging clarity
-type-level misuse resistance
-```
-
-A primary success criterion is:
-
-> **The Reconciler should remove a repeated block of application-written coordination without obscuring ordinary Effect resource code.**
-
----
-
-## 82. Kill criteria
-
-The project should be reconsidered if:
-
-```text
-RcMap/LayerMap plus a tiny helper
-achieve nearly the same compression
-
-owner/require relationships rarely appear
-in real Effect applications
-
-the API requires frequent escape hatches
-into internal graph state
-
-binding types become harder to understand
-than direct Effect composition
-
-runtime policy grows into a general workflow
-or actor framework
-
-most applications still need their own
-manual readiness/controller protocol
-
-the main benefit becomes DevTools rather
-than correctness and code reduction
-```
-
-The goal is not to justify the abstraction at all costs.
-
----
-
-## 83. Deferred from v0
-
-Do not include:
-
-```text
-query caching
-stale-time policies
-actor mailboxes
-durable workflows
-distributed orchestration
-remote reconciliation
-automatic dependency discovery
-arbitrary capability cycles
-complex supervision DSLs
-renderer
-router
-forms
-HMR
-general signal reactivity
-stable detailed reconciliation events
-```
-
-The v0 scope is deliberately narrow:
-
-> **state-reconciled Effect lifetimes**
-
----
-
-## 84. Minimal standalone API
-
-The intended conceptual public surface is approximately:
+## 9. Observation
 
 ```ts
-Reconciler.define
-
-define.one
-
-define.many
-
-Definition.bind
-
-bind.one
-
-bind.many
-
-Key.*
-
-Replacement.sequential
-
-Replacement.overlap
-
-Reconciler.make
-Reconciler.ref
-
-Controller.commit
-
-Controller.failures
-Controller.status
-Controller.retry
-
-Controller.snapshot
-
-Controller.shutdown
-```
-
-Potential public types:
-
-```text
-Definition
-Binding<State>
-Controller<State>
-
-OneHandle
-ManyHandle
-
-Key<A>
-ReplacementPolicy
-
-LifetimeRef
-LifetimeFailure
-LifetimeStatus
-
-ReconcilerSnapshot
-LifetimeSnapshot
-LifetimeStatus
-
-DefinitionError
-BindingError
-CommitError
-```
-
-Notably absent:
-
-```text
-Topology
-Desire
-ProcessSpec
-ProcessGeneration
-TopologyRevision
-LiveProcess
-Scope handles
-Runtime handles
-detailed reconciliation events
-```
-
----
-
-## 85. Example complete binding
-
-Foldkit:
-
-```ts
-const FoldkitEditor =
-  Editor.bind<Model>(bind => ({
-    settings:
-      bind.one(
-        Editor.Settings,
-        model =>
-          Option.some(
-            model.settingsRevision
-          )
-      ),
-
-    session:
-      bind.one(
-        Editor.Session,
-        model =>
-          model.session.pipe(
-            Option.map(
-              session =>
-                session.userId
-            )
-          )
-      ),
-
-    workspace:
-      bind.one(
-        Editor.Workspace,
-        (
-          model,
-          _userId
-        ) =>
-          model.workspaceId
-      ),
-
-    language:
-      bind.one(
-        Editor.Language,
-        (
-          model,
-          _workspaceId
-        ) =>
-          Option.some(
-            model.language
-          )
-      ),
-
-    documents:
-      bind.many(
-        Editor.Document,
-        (
-          model,
-          _workspaceId
-        ) =>
-          model.openDocuments
-      ),
-
-    diagnostics:
-      bind.one(
-        Editor.Diagnostics,
-        (
-          _model,
-          _documentUri
-        ) =>
-          Option.some(null)
-      )
-  }))
-```
-
-Then:
-
-```ts
-const controller =
-  yield* Reconciler.make(
-    FoldkitEditor
-  )
-```
-
-and after every committed Model transition:
-
-```ts
-yield* controller.commit(model)
-```
-
----
-
-## 86. Same Definition, different control plane
-
-Daemon:
-
-```ts
-const DaemonEditor =
-  Editor.bind<DaemonConfig>(
-    bind => ({
-      settings:
-        bind.one(
-          Editor.Settings,
-          config =>
-            Option.some(
-              config.settingsEpoch
-            )
-        ),
-
-      session:
-        bind.one(
-          Editor.Session,
-          config =>
-            config.account
-        ),
-
-      workspace:
-        bind.one(
-          Editor.Workspace,
-          config =>
-            config.project
-        ),
-
-      language:
-        bind.one(
-          Editor.Language,
-          config =>
-            Option.some(
-              config.parser
-            )
-        ),
-
-      documents:
-        bind.many(
-          Editor.Document,
-          config =>
-            config.files
-        ),
-
-      diagnostics:
-        bind.one(
-          Editor.Diagnostics,
-          () =>
-            Option.some(null)
-        )
-    })
-  )
-```
-
-The runtime architecture is reused unchanged.
-
----
-
-## 87. Mental model for generic Effect users
-
-A generic Effect developer should think:
-
-> **Define the dynamic Effect resource families once, then bind any immutable control state to the keys that should currently exist.**
-
-They should not need to reason about:
-
-```text
-desired topology trees
-controller generations
-dependency indexes
-reconciliation revisions
-```
-
-for ordinary usage.
-
----
-
-## 88. Mental model for Foldkit users
-
-A Foldkit developer should think:
-
-> **After every committed Model, `effect-reconciler` ensures that the Effect lifetimes implied by that Model eventually exist and obsolete lifetimes eventually disappear.**
-
-The distinction remains:
-
-```text
-Message
-→ Command
-```
-
-for event-caused finite work,
-
-and:
-
-```text
-Model
-→ Reconciler
-```
-
-for state-caused lifetime existence.
-
----
-
-## 89. Internal implementation model
-
-Although the public API is intentionally compact, the runtime implementation remains a dynamic Effect topology reconciler.
-
-Internally:
-
-```text
-Compiled Definition
-
-├── lifetime ownership tree
-├── capability dependency DAG
-├── reverse dependency index
-└── cardinality metadata
-
-              +
-
-Binding<State>
-
-              ↓
-
-commit(state)
-
-              ↓
-
-Desired Instance Snapshot
-
-              ↓
-
-Reconciliation
-
-              ↓
-
-Live Physical Instances
-
-├── Scope ownership tree
-└── immutable capability bindings
-```
-
-The internal graph model is necessary.
-
-It is not user-facing.
-
----
-
-## 90. Naming
-
-The package and product name is:
-
-> **`effect-reconciler`**
-
-The primary public abstraction is:
-
-> **Reconciler**
-
-The primary user-facing vocabulary is:
-
-```text
-Reconciler
-Definition
-Binding
-Controller
-Lifetime
-```
-
-The phrase:
-
-> **dynamic Effect topology**
-
-remains the architectural description for the internal ownership and capability graph.
-
-This gives a deliberate naming split:
-
-```text
-package:
-effect-reconciler
-
-public operation:
-reconciliation
-
-managed concept:
-Effect lifetimes
-
-internal architecture:
-dynamic Effect topology
-```
-
-This avoids exposing graph terminology as a requirement of normal use while preserving it where it accurately describes the implementation.
-
----
-
-## 91. Final definition
-
-`effect-reconciler` can be summarized as:
-
-> **A Reconciler compiles a static architecture of keyed Effect lifetime families, lifetime ownership, and capability dependencies. A Binding maps immutable control state into desired keys for those families. Each committed state atomically replaces desired state, and the Controller asynchronously converges live Effect Scopes and capability bindings toward that desire.**
-
-More compactly:
-
-> **State-reconciled keyed Effect lifetimes.**
-
-The product thesis is:
-
-> **Define dynamic Effect architecture once; bind it to application state; let `effect-reconciler` own the races.**
-
----
-
-## 92. Semantic lifetime reference
-
-Every semantic API speaks one vocabulary: a reference naming
-
-```text
-family handle
-+
-semantic key
-+
-semantic owner path
-```
-
-The family handle — not its label — is the identity. Two families may share a
-display name, so a name-keyed API could not distinguish them.
-
-```ts
-interface LifetimeRef<H> {
-  readonly family: H
-  readonly key: KeyOf<H>
-  readonly parent: OwnerOf<H> // a LifetimeRef, or null at the root
+interface Controller<State> {
+  readonly commit: (state: State) => Effect<void, CommitError>
+  readonly retry: (ref: LifetimeRef) => Effect<void, ControllerClosed>
+  readonly status: (ref: LifetimeRef) => Effect<Option<LifetimeStatus>>
+  readonly failures: Stream<LifetimeFailure>
+  readonly shutdown: Effect<void>
 }
 ```
 
-The ownership chain is type-checked, so a reference cannot name a lifetime the
-Definition could not produce. References are built with `Reconciler.ref`, and
-arrive with every failure. Owned selectors receive their owner as one, which is
-what lets a selector distinguish two identical direct owner keys under
-different ancestors.
+There is deliberately no `start`, `stop`, `restart`, `pause`, `rebind` or
+`invalidate`.
 
-A reference never exposes:
+### 9.1 Status is authoritative
 
 ```text
-Scope
-Fiber
-Context
-physical generation
-reconcile revision
-live slot or instance
+Some(Starting | Running | Failed(cause) | Stopping)
+None  — no physical generation for that semantic identity
 ```
 
----
+`None` covers both "not desired" and "desired but not admitted": what was asked
+for lives in the application's own state, and the runtime reports what exists.
+`status` cannot be missed, so any application state derived from a failure must
+be recoverable from it.
 
-## 93. Same-key retry
+### 9.2 Failures are a lossy stream
 
-A failed lifetime keeps its slot until desire changes, which is what makes
-recommitting the same state lifecycle-idempotent. Recommitting therefore cannot
-serve as an implicit retry, and the alternatives — a retry nonce inside the
-semantic key, withdrawing and restoring desire, an unrelated domain-state
-change — would all pollute domain identity with operational generation state.
+`failures` is a live `Stream` of `LifetimeFailure` — a `LifetimeRef` and the
+cause — for reacting, never for remembering. Its delivery contract:
+
+- a failure is published only if the semantic desire is still current when
+  startup completes; desire withdrawn during startup means no event;
+- a superseded generation's failure is never published;
+- with no subscriber attached, nothing is retained;
+- subscriptions are Scope-owned;
+- the buffer is bounded and drops the oldest events under overflow;
+- publication never blocks reconciliation.
+
+Because publication must not hold reconciliation up, the stream must be lossy,
+and a lossy channel cannot be the authority (§13.9, §13.12).
+
+### 9.3 Retry
 
 ```ts
 controller.retry(ref)
 ```
 
 > If the referenced lifetime is still desired and its current physical
-> generation is Failed, retire that generation and allow a fresh one to be
+> generation is `Failed`, retire that generation and allow a fresh one to be
 > admitted when owner and provider conditions permit.
-
-Retry never changes semantic identity: the key, the owner path and therefore
-every descendant's identity are exactly what the Binding already described.
 
 | situation | behaviour |
 | :--- | :--- |
@@ -2881,110 +569,19 @@ every descendant's identity are exactly what the Binding already described.
 | sequential cleanup in flight | waits for the failed generation's finalization boundary |
 | called repeatedly | idempotent: one retirement, not one per call |
 
----
+Retry never changes semantic identity: the key, the owner path and therefore
+every descendant's identity remain what the Binding already described. A retry
+that fails again reports a fresh failure.
 
-## 94. Failed-slot semantics
+### 9.4 What is never exposed
 
-A generation whose startup failed is not discarded: it holds its slot, in the
-`Failed` state, with its cause. That is what stops the runtime from spinning on
-a failing resource, and what makes "still broken" observable rather than
-indistinguishable from "not started yet".
+No semantic API exposes a Scope, Fiber, Context, physical generation, reconcile
+revision, live slot or instance, mutable internal map, or internal desired
+revision.
 
-The slot is released when either
+## 10. Errors
 
-```text
-desire changes
-or
-Controller.retry retires the generation
-```
-
-Under `Replacement.sequential`, the replacement waits for the failed
-generation's finalization boundary, so a partially acquired exclusive resource
-is fully released before another attempt acquires it.
-
----
-
-## 95. Failure observation: event versus status
-
-Two mechanisms, deliberately different in strength.
-
-`Controller.status(ref)` is authoritative and cannot be missed. Its shape is
-given in §99: `Some` of a physical state, or `None` when no generation exists.
-
-`Controller.failures` is a live convenience: a `Stream` of the failures of
-lifetimes whose desire is still current.
-
-Its delivery contract is explicit:
-
-- a failure is published only if the semantic desire is still current at the
-  moment startup completes — desire withdrawn during startup means no event;
-- a superseded generation's failure is never published;
-- with no subscriber attached, nothing is retained;
-- the buffer is bounded and drops the oldest events under overflow;
-- publication never blocks reconciliation.
-
-Therefore:
-
-> If application state depends on a failure, that state must be recoverable
-> from `status`. Notifications are for reacting, not for remembering.
-
----
-
-## 96. Definition identity
-
-A Definition's identity is a per-call object, compared by reference; a family's
-identity is its handle object. Neither is a name nor a numeric index, so
-handles cannot be confused across Definitions that declare families in the same
-order, nor across two duplicate installed copies of the package. Numeric family
-ids remain, but only as indexes within one Definition.
-
----
-
-## 97. Key identity is Effect's
-
-A family declares no key descriptor. The semantic key type is inferred from
-`start`, and semantic equality is `Equal.equals` with `Hash.hash`, the same
-convention `RcMap` and the Effect collections use.
-
-```ts
-define.one("Session", {
-  start: (userId: string) => ...
-})
-```
-
-Primitives work as themselves. Structural keys are ordinary values — a plain
-object, an array, an Effect `Data` value — because Effect compares and hashes
-all of them structurally. Nothing has to be serialized, and therefore nothing
-has to be escaped: the delimiter-collision class of bug the earlier encoded
-path scheme had to defend against cannot be expressed.
-
-Two rules complete the contract, neither checked at runtime:
-
-- **Keys are immutable.** Identity is cached per key value, so mutating a key
-  after it has been desired corrupts the identity it was admitted under.
-- **Keys compare stably.** A value compared by reference — a plain function, or
-  anything wrapped in `Equal.byReference` — is a valid key exactly when the
-  Binding yields the same value each commit. A function that carries `Equal`
-  and `Hash` is an ordinary structural key.
-
-The key type is inferred from `start`, so its parameter must be annotated;
-`(_: null)` names a family whose key carries no information. An un-inferable
-key type is rejected at compile time rather than widening to `unknown`, which
-would let a Binding desire anything at all for that family.
-
-The §8.3 rule is unchanged and now purely semantic:
-
-> Put a value in the semantic key only when changing it should create a
-> different semantic lifetime.
-
-Identity performance is measured, not assumed: `bench/RESULTS.md` records this
-scheme against the encoded-string scheme it replaced, with identical churn.
-
----
-
-## 98. Errors are tagged data
-
-Expected failures are Effect-style tagged errors carrying the family they
+Expected failures are Effect-style tagged data carrying the family they
 concern, so recovery is ordinary `catchTag` / `catchTags`:
 
 ```text
@@ -3003,1182 +600,309 @@ CommitError     = ControllerClosed | InvalidDesiredState
 DuplicateDesiredKey | InvalidSelectorResult | SelectorFailed | UnstableKey
 ```
 
-Message formatting is presentation, not structure. Impossible states caused by
-a bug in this package are defects, not members of these unions.
+Message formatting is presentation, not structure. States made impossible by
+this package's own invariants are defects, not members of these unions.
 
----
+## 11. Invariants and non-guarantees
 
-## 99. The observation surface
+Three structural invariants carry most of the value:
 
-```ts
-interface Controller<State> {
-  readonly commit: (state: State) => Effect<void, CommitError>
-  readonly retry: (ref: LifetimeRef) => Effect<void, ControllerClosed>
-  readonly status: (ref: LifetimeRef) => Effect<Option<LifetimeStatus>>
-  readonly failures: Stream<LifetimeFailure>
-  readonly shutdown: Effect<void>
-}
-```
+- **Admission** — the four conditions of §6.1 hold at the admission point.
+- **Ownership closure** — an obsolete owner makes every physical descendant
+  obsolete, without any child binding restating the ancestor condition. This is
+  what deletes `if session && workspace && document …` from application code.
+- **Dependency invalidation** — an invalid provider binding obsoletes exactly
+  its bound dependents. Replacing Settings may replace Diagnostics while
+  Document, Workspace and Language are retained.
 
-`status` is authoritative and answers with what exists:
+Unless stated otherwise, the runtime does **not** guarantee sibling startup or
+shutdown ordering, reconciliation traversal order, wall-clock convergence
+deadlines, fair scheduling among unrelated lifetimes, materialization of every
+intermediate desired state, one physical generation per commit, one event per
+internal transition, stable generation or revision numbers, or global finalizer
+ordering beyond Scope semantics. Depending on any of these is depending on an
+implementation detail.
 
-```text
-Some(Starting | Running | Failed(cause) | Stopping)
-None  — no physical generation for that semantic identity
-```
+## 12. Relationship to Effect and Foldkit
 
-`None` covers both "not desired" and "desired but not admitted". What was
-asked for lives in the application's own state; the runtime reports what
-exists.
+### 12.1 Scope, Context, Layer
 
-`failures` is a live `Stream`, not a raw PubSub: a convenience for reacting,
-never for remembering. A subscriber that falls behind loses events rather than
-holding reconciliation up, which is exactly why `status` is the authority.
+Scope remains the lifetime model, Context the capability model, and Layer the
+way to build application-lifetime infrastructure. A lifetime's Scope is an
+ordinary Effect Scope; its published capabilities are an ordinary `Context`.
 
-Controller stays this small deliberately: no `start`, `stop`, `restart`,
-`pause`, `rebind` or `invalidate`.
+### 12.2 Layer interoperability
 
----
-
----
-
----
-
-# Implementation Plan
-
-## 1. Goal
-
-The next milestone is not another specification pass.
-
-The next milestone is:
-
-> **Build the smallest real `effect-reconciler` kernel that can falsify the specification.**
-
-The implementation should use actual Effect primitives and deliberately omit non-essential product features.
-
-The key question is:
-
-> **Does the proposed state machine remain correct and ergonomic when implemented with real Effect Scopes, Fibers, Contexts, interruption, and finalization?**
-
----
-
-## 2. Scope of the v0 kernel
-
-Implement only:
-
-```text
-Reconciler.define
-define.one
-define.many
-
-Definition.bind
-bind.one
-bind.many
-
-Key.*
-
-Replacement.sequential
-Replacement.overlap
-
-Reconciler.make
-
-Controller.commit
-Controller.shutdown
-```
-
-Internally implement only what is necessary for:
-
-```text
-ownership tree
-capability DAG
-one/many desired instances
-semantic key equality
-Starting / Running / Stopping / Failed
-physical generation identity
-provider-generation bindings
-startup cancellation
-replacement
-latest-state coalescing
-shutdown
-```
-
----
-
-## 3. Explicitly defer
-
-Do not implement yet:
-
-```text
-snapshot API
-DevTools
-diagnostic event stream
-supervision/retry DSL
-incremental selectors
-nested Reconcilers
-polished package exports
-Foldkit-specific public abstractions
-HMR
-complex tracing
-```
-
-These should not distract from proving the runtime semantics.
-
----
-
-## 4. First real implementation target
-
-Use the existing editor/service topology:
-
-```text
-Application
-├── Settings
-└── Session
-    └── Workspace
-        ├── Language
-        └── Document × N
-            └── Diagnostics
-
-Settings ──────┐
-Language ──────┼──► Diagnostics
-Workspace ─────┘
-```
-
-This topology exercises:
-
-```text
-root one
-nested one
-nested many
-non-ancestral provider dependency
-provider replacement
-owner replacement
-sequential replacement
-overlap replacement
-rapid state churn
-startup failure
-generation isolation
-```
-
-Implement it using real Effect primitives rather than a semantic simulator.
-
----
-
-## 5. Recommended internal model
-
-A minimal internal representation may include:
+A lifetime may build a Layer in its own instance Scope, which is preferable to
+inventing Reconciler-specific Layer semantics:
 
 ```ts
-interface CompiledDefinition {
-  readonly ownerChildren: ...
-  readonly providerDependents: ...
-  readonly definitions: ...
-}
-
-interface LiveSlot {
-  readonly current: LiveInstance | undefined
-  readonly retiring: Set<LiveInstance>
-}
-
-interface LiveInstance {
-  readonly definition: LifetimeHandle<any, any>
-  readonly semanticKey: unknown
-  readonly generation: InternalGeneration
-
-  readonly owner:
-    LiveInstance | undefined
-
-  readonly providers:
-    ReadonlyMap<
-      LifetimeHandle<any, any>,
-      LiveInstance
-    >
-
-  readonly scope:
-    Scope.Closeable
-
-  readonly status:
-    InternalStatus
-
-  readonly providedContext:
-    Context.Context<any> | undefined
-}
-```
-
-These are internal details, not public types.
-
----
-
-## 6. Controller architecture
-
-Avoid a controller loop where the controller's own state mutations are cancelled by newer desired state.
-
-Do not structure the central controller as conceptually:
-
-```text
-runForEachLatest(commit => reconcile(commit))
-```
-
-if cancellation can interrupt controller bookkeeping.
-
-Prefer:
-
-```text
-serialized controller state machine
-+
-interruptible lifecycle Fibers
-+
-latest authoritative desired snapshot
-```
-
-The controller itself owns consistency.
-
-Individual startup/finalizer Effects remain interruptible according to lifecycle policy.
-
----
-
-## 7. Commit implementation
-
-`commit(state)` should:
-
-```text
-1. evaluate the Binding against one immutable State value
-2. validate dynamic desired-state invariants
-3. atomically publish the new desired snapshot
-4. enqueue/trigger reconciliation
-5. return
-```
-
-It must not await:
-
-```text
-startup
-shutdown
-provider readiness
-finalizers
-full convergence
-```
-
-The publication critical section should be small.
-
----
-
-## 8. Binding compiler
-
-Compile bindings into static selector descriptors.
-
-Conceptually:
-
-```ts
-interface CompiledBinding<State> {
-  readonly selectors:
-    ReadonlyArray<
-      BoundSelector<State>
-    >
-}
-```
-
-For v0, it is acceptable to evaluate every selector on every commit.
-
-Do not optimize selector invalidation until semantics are proven.
-
-The implementation should preserve a path toward:
-
-```text
-affected selector
-→ affected desired slot
-```
-
-later.
-
----
-
-## 9. Conformance suite first
-
-Before completing the controller implementation, encode the specification as executable tests.
-
-The test suite is the actual v0 contract.
-
-### 9.1 Identity retention
-
-```text
-same semantic key
-→ same physical lifetime retained
-```
-
-Verify:
-
-- no second startup;
-- no shutdown;
-- no child churn.
-
----
-
-### 9.2 Key replacement
-
-```text
-A
-→ B
-```
-
-Verify:
-
-- A becomes obsolete;
-- replacement semantics obey the configured policy;
-- B becomes the current lifetime.
-
----
-
-### 9.3 Owner invalidation
-
-```text
-Session changes
-```
-
-Verify:
-
-```text
-Workspace
-Language
-Documents
-Diagnostics
-```
-
-under the old Session are all invalidated structurally.
-
-No child binding should need to repeat the Session predicate.
-
----
-
-### 9.4 Provider-only replacement
-
-```text
-Settings A
-→ Settings B
-```
-
-Verify:
-
-```text
-Diagnostics replaced
-```
-
-while retaining:
-
-```text
-Session
-Workspace
-Language
-Documents
-```
-
-unless they independently depend on Settings.
-
----
-
-### 9.5 Provider changes during dependent startup
-
-Central race:
-
-```text
-Provider A#1 Running
-        ↓
-Dependent D#1 Starting
-
-Provider A#1 becomes obsolete
-Provider A#2 starts
-
-D#1 startup completes late
-```
-
-Required result:
-
-```text
-D#1 never becomes Running
-D#1 never publishes capabilities
-D#1 never admits children
-D#2 may start against A#2
-```
-
-This should be one of the most important conformance tests.
-
----
-
-### 9.6 Owner changes during child startup
-
-```text
-Owner O#1 Running
-Child C#1 Starting
-
-O#1 becomes obsolete
-O#2 starts
-
-C#1 startup completes late
-```
-
-Required:
-
-```text
-C#1 never becomes Running
-```
-
-and any new child must belong to O#2.
-
----
-
-### 9.7 Sequential coalescing
-
-```text
-A Running
-desired B
-A starts stopping
-desired C
-```
-
-Required:
-
-```text
-C starts after A shutdown
-B never starts
-```
-
-unless B had already crossed the admission boundary before C became authoritative.
-
----
-
-### 9.8 Overlap replacement
-
-```text
-A Running
-desired B
-```
-
-with overlap policy.
-
-Verify:
-
-```text
-A Stopping
-B Starting/Running
-```
-
-may coexist.
-
-Verify that descendants/providers never mix between generations.
-
----
-
-### 9.9 Failed provider
-
-```text
-Language desired
-Language startup fails
-Diagnostics desired
-```
-
-Required:
-
-```text
-Diagnostics never starts
-```
-
-until a valid Language provider becomes Running.
-
----
-
-### 9.10 Equivalent commits
-
-```text
-commit(state1)
-commit(state2)
-```
-
-where bindings produce equivalent desire.
-
-Verify:
-
-```text
-zero startup
-zero shutdown
-zero generation churn
-```
-
-caused by the second commit.
-
----
-
-### 9.11 Commit atomicity
-
-Test interruption around publication.
-
-Required contract:
-
-```text
-commit succeeds
-→ new desire definitely authoritative
-
-commit fails/interrupted before success
-→ new desire definitely not authoritative
-```
-
-There must be no externally ambiguous partially published desired snapshot.
-
----
-
-### 9.12 Concurrent commits
-
-Run:
-
-```text
-Fiber A → commit(A)
-Fiber B → commit(B)
-```
-
-Verify:
-
-- commits linearize;
-- final authoritative desire corresponds to one total order;
-- controller internal state is not corrupted.
-
-Do not assert which caller wins without external synchronization.
-
----
-
-### 9.13 Shutdown during startup
-
-```text
-lifetime Starting
-↓
-controller.shutdown
-```
-
-Verify:
-
-- startup interrupted;
-- late completion cannot become Running;
-- root Scope closes;
-- shutdown waits for structured finalization.
-
----
-
-### 9.14 Shutdown idempotency
-
-```text
-shutdown
-shutdown
-```
-
-Both calls succeed.
-
----
-
-### 9.15 Commit after shutdown
-
-```text
-shutdown
-commit(state)
-```
-
-Required:
-
-```text
-ControllerClosed
-```
-
----
-
-### 9.16 Many reconciliation
-
-Given:
-
-```text
-Documents = {foo, bar}
-```
-
-then:
-
-```text
-Documents = {bar, baz}
-```
-
-Verify:
-
-```text
-foo stops
-bar retained
-baz starts
-```
-
-independently.
-
----
-
-### 9.17 Owner-relative identity
-
-Ensure:
-
-```text
-Session[alice]
-└── Workspace[acme]
-```
-
-and:
-
-```text
-Session[bob]
-└── Workspace[acme]
-```
-
-cannot share one physical Workspace lifetime.
-
----
-
-### 9.18 Environment isolation
-
-Create overlapping old/new owner or provider generations.
-
-Record capability identities observed by descendants/dependents.
-
-Assert:
-
-```text
-zero cross-generation observations
-```
-
----
-
-## 10. Service typing experiment
-
-The largest remaining API uncertainty is how provided and required services integrate with normal Effect environments.
-
-Prefer an API where user Effects remain ordinary Effect code.
-
-Ideal:
-
-```ts
-const Diagnostics =
-  define.one("Diagnostics", {
-    owner:
-      Document,
-
-    requires: {
-      settings:
-        Settings,
-
-      language:
-        Language
-    },
-
-    start:
-      uri =>
-        Effect.gen(function* () {
-          const settings =
-            yield* SettingsService
-
-          const language =
-            yield* LanguageService
-
-          // ordinary Effect code
-        })
+start: (key) =>
+  Effect.gen(function* () {
+    const scope = yield* Effect.scope
+    return yield* Layer.buildWithScope(makeLayer(key), scope)
   })
 ```
 
-Avoid requiring a parallel runtime API such as:
+A `Reconciler.fromLayer` helper may follow if repeated integration proves
+cumbersome — after real usage evidence, not before.
 
-```ts
-start: (uri, context) =>
-  context.services.settings
-```
-
-unless TypeScript or Effect environment mechanics make ordinary service access impractical.
-
-### Acceptance criterion
-
-Inside `start`, an Effect developer should still feel like they are writing Effect.
-
-If `effect-reconciler` introduces a second DI model, reconsider the design.
-
----
-
-## 11. Foldkit integration experiment
-
-Do not design a new Foldkit API initially.
-
-Use the thinnest integration possible.
-
-Conceptually:
-
-```ts
-const EditorModelBinding =
-  Editor.bind<Model>(...)
-
-const controller =
-  yield* Reconciler.make(
-    EditorModelBinding
-  )
-```
-
-After Foldkit commits a Model:
-
-```ts
-yield* controller.commit(model)
-```
-
-The Foldkit runtime should guarantee serialized commit ordering.
-
-Do not await resource convergence inside the Message transaction.
-
----
-
-## 12. Real Foldkit migration
-
-After the kernel passes its conformance suite, migrate one real Foldkit feature currently requiring significant lifecycle coordination.
-
-Prefer a feature containing several of:
+### 12.3 RcMap and LayerMap
 
 ```text
-ManagedResource
-Subscriptions
-nested lifetime conditions
-operational readiness Model fields
-provider-dependent resources
-rapid key changes
+RcMap / LayerMap:    a resource exists while referenced
+effect-reconciler:   a resource exists while desired and admissible
 ```
 
-Do not choose an artificially simple feature.
-
----
-
-## 13. Migration metrics
-
-Measure before and after.
-
-### Application state
-
-Count Model fields that exist only to coordinate runtime readiness:
-
-```text
-sessionReady
-workspaceReady
-resourceAvailable
-languageReady
-...
-```
-
-Desired result:
-
-```text
-large reduction or elimination
-```
-
-where those fields are not domain/UI state.
-
----
-
-### Messages
-
-Count Messages used only for lifecycle bookkeeping:
-
-```text
-ResourceAcquired
-ResourceReleased
-RetryAcquire
-ChildReady
-ParentReady
-...
-```
-
-Retain Messages that have genuine application semantics.
-
----
-
-### Predicates
-
-Count duplicated conditions such as:
-
-```text
-session exists
-AND workspace exists
-AND language ready
-AND document exists
-```
-
-A successful ownership/dependency model should structurally eliminate most of these.
-
----
-
-### Manual invalidation
-
-Count code that manually reacts to:
-
-```text
-provider changed
-owner changed
-key changed
-resource released
-```
-
-to restart dependent resources.
-
----
-
-### Tests
-
-Count application-level tests whose sole purpose is verifying generic lifecycle races.
-
-Those should move into `effect-reconciler`'s conformance suite.
-
-Application tests should focus on domain behavior.
-
----
-
-### SLOC
-
-Measure:
-
-```text
-application orchestration SLOC before
-application orchestration SLOC after
-generic reconciler SLOC
-```
-
-Do not optimize for framework SLOC alone.
-
-The economic case depends on runtime cost being amortized across applications/features.
-
----
-
-## 14. Success criteria
-
-Proceed toward a real package if the real implementation demonstrates all of the following.
-
-### Correctness
-
-The conformance suite passes with actual Effect interruption and finalization.
-
-### Compression
-
-A real application materially reduces lifecycle coordination code.
-
-A useful target is:
-
-```text
-30–50% reduction
-```
-
-in lifecycle-specific application code, with a much larger reduction in manual race-handling rules.
-
-### Effect-native ergonomics
-
-Resource code still uses:
-
-```text
-Effect
-Scope
-Context
-Layer
-```
-
-normally.
-
-### Narrow runtime
-
-The implementation does not immediately require:
-
-```text
-actors
-mailboxes
-workflow state
-query caching
-distributed coordination
-complex supervision
-```
-
-to be useful.
-
-### Type safety
-
-The API infers:
-
-```text
-keys
-owner keys
-required services
-cardinality
-```
-
-without pervasive explicit generics or `any`.
-
----
-
-## 15. Go / no-go questions
-
-After the kernel and one real migration, answer:
-
-1. **Did it eliminate application-written lifecycle coordination?**
-2. **Did the resulting application become easier for an Effect developer to understand?**
-3. **Did ordinary Effect code remain ordinary Effect code inside each lifetime?**
-4. **Did ownership and capability dependencies eliminate real duplicated predicates?**
-5. **Did provider-generation correctness move from application tests into framework guarantees?**
-6. **Did the runtime remain a narrow reconciler rather than expanding into an actor/workflow framework?**
-7. **Is the abstraction meaningfully better than direct `RcMap` / `LayerMap` composition?**
-
-If the answers are mostly yes, proceed.
-
-If not, shrink the idea toward Foldkit-specific orchestration or additions around existing Effect keyed-resource primitives.
-
----
-
-## 16. Suggested implementation phases
-
-### Phase 1 — Type skeleton
-
-Implement:
-
-```text
-Reconciler.define
-define.one
-define.many
-Definition.bind
-bind.one
-bind.many
-Key
-Replacement
-```
-
-Goal:
-
-```text
-tsc --strict --noEmit
-```
-
-with misuse tests for:
-
-```text
-wrong key type
-one/many mismatch
-wrong owner key
-invalid requirement handle
-cross-definition handle use
-```
-
----
-
-### Phase 2 — Static compiler
-
-Compile:
-
-```text
-definitions
-```
-
-into:
-
-```text
-owner → children
-provider → dependents
-cardinality metadata
-definition IDs
-```
-
-Validate cycles and invalid references.
-
-No runtime lifecycle behavior yet.
-
----
-
-### Phase 3 — Desired snapshot compiler
-
-Implement:
-
-```text
-Binding<State>
-+
-state
-→ desired instance snapshot
-```
-
-Cover:
-
-```text
-root one
-root many
-owner-relative one
-owner-relative many
-duplicate semantic key rejection
-```
-
----
-
-### Phase 4 — Basic one-lifetime controller
-
-Support:
-
-```text
-Absent
-Starting
-Running
-Stopping
-Failed
-```
-
-for one root `define.one`.
-
-Prove:
-
-```text
-same key retain
-key change replace
-startup cancellation
-late readiness suppression
-shutdown
-```
-
----
-
-### Phase 5 — Ownership tree
-
-Add parent-child Scope ownership.
-
-Prove:
-
-```text
-parent invalidation dominates children
-child cannot outlive owner
-child waits for owner Running
-```
-
----
-
-### Phase 6 — `many`
-
-Add keyed collections.
-
-Prove independent:
-
-```text
-add
-retain
-remove
-replace
-```
-
-under each owner.
-
----
-
-### Phase 7 — Capability dependencies
-
-Add:
-
-```text
-requires
-provider readiness
-provider binding capture
-reverse dependency index
-dependent invalidation
-```
-
-This phase validates the main differentiation from simple nested Scope trees.
-
----
-
-### Phase 8 — Replacement policies
-
-Add:
-
-```text
-Sequential
-Overlap
-```
-
-and latest-state coalescing.
-
----
-
-### Phase 9 — Foldkit migration
-
-Integrate through:
-
-```text
-committed Model
-→ controller.commit(model)
-```
-
-Migrate one non-trivial real feature.
-
-Measure application-code deletion.
-
----
-
-### Phase 10 — Decision point
-
-Only after Phase 9 decide whether to invest in:
-
-```text
-snapshot API
-diagnostics
-DevTools
-selector optimization
-supervision
-package polish
-documentation
-```
-
----
-
-## 17. Recommended first repository layout
-
-```text
-effect-reconciler/
-├── src/
-│   ├── Reconciler.ts
-│   ├── Definition.ts
-│   ├── Binding.ts
-│   ├── Key.ts
-│   ├── Replacement.ts
-│   ├── internal/
-│   │   ├── compiledDefinition.ts
-│   │   ├── desiredSnapshot.ts
-│   │   ├── controller.ts
-│   │   ├── liveInstance.ts
-│   │   ├── reconciliation.ts
-│   │   └── generation.ts
-│   └── index.ts
-├── test/
-│   ├── identity.test.ts
-│   ├── ownership.test.ts
-│   ├── dependencies.test.ts
-│   ├── replacement.test.ts
-│   ├── failure.test.ts
-│   ├── commit.test.ts
-│   ├── shutdown.test.ts
-│   └── environmentIsolation.test.ts
-├── examples/
-│   └── editor.ts
-├── package.json
-└── tsconfig.json
-```
-
-The exact module boundaries should be allowed to evolve during implementation.
-
----
-
-## 18. Immediate next artifact
-
-The immediate next artifact should be:
-
-> **A real Effect-backed `effect-reconciler` v0 kernel plus the conformance suite.**
-
-Not:
-
-```text
-spec v0.8
-DevTools
-documentation site
-general supervision
-performance optimization
-```
-
-The specification is mature enough that the implementation should now be allowed to challenge it.
-
-The next milestone succeeds when the editor topology runs on real Effect Scopes and passes the race-heavy conformance suite with no application-written lifecycle controller.
+Both solve keyed resource lifetimes; only the trigger differs. The
+implementation may use them internally, and the public abstraction should not
+duplicate what they already do.
+
+### 12.4 Foldkit
+
+Foldkit is a natural control plane: `Message → update → committed Model`, and
+the Model goes to the View, to Commands, and to `controller.commit`. The
+adapter's obligation is narrow:
+
+> Only committed Models are passed to the Reconciler, and in the same
+> serialized order as Foldkit's Model transitions.
+
+The Message loop must not await convergence. Two further boundaries matter:
+
+- **Event versus state causality.** "Because X happened, run this finite
+  Effect" is a Command. "While the committed state desires identity X, maintain
+  this lifetime" is the Reconciler.
+- **Stale outputs.** Cancellation cannot retract a Message already dispatched.
+  Generation safety protects runtime execution; reducer-level identity or
+  version validation protects committed domain state.
+
+Runtime status is not application state. If the UI needs `WorkspaceReady` or
+`LanguageServerUnavailable`, the lifetime should dispatch a semantic Message
+and let `update` decide, rather than the View reading `Starting`/`Running`
+directly.
+
+## 13. Design decisions
+
+Why the runtime is shaped this way: what each decision rules out, and where the
+evidence lives.
+
+**13.1 Definition and Binding are separate.** The architecture of an
+application's dynamic resources does not change when its state shape does.
+Separation lets one Definition serve a Foldkit Model, a daemon config and a
+test fixture without restating the topology. It rules out a fused
+"resource description + state selector" object, which would be unusable outside
+the state type it was born in. *Evidence:* `test/identity.test.ts`,
+`examples/editor.ts`.
+
+**13.2 Topology is internal vocabulary.** Applications write `owner:` and
+`requires:` and never name the ownership tree, capability DAG, reconcile pass,
+slots or generations. Every internal structure an application can name becomes
+a compatibility obligation, and the runtime must stay free to change how it
+converges. It rules out public topology inspection, ordering guarantees between
+unrelated families, and DevTools built on internal identity.
+
+**13.3 Semantic key, not physical generation.** Applications reason about what
+should exist; the runtime reasons about what does exist. Conflating them is
+what forces retry nonces and generation counters into domain state.
+*Evidence:* §5, `test/identity.test.ts`.
+
+**13.4 Ownership and capability dependency are different relations.**
+Collapsing them would force either a spurious tree — a resource cannot have two
+owners — or a spurious DAG, in which a child must die with its parent, which a
+dependency does not imply. *Evidence:* `test/ownership.test.ts`,
+`test/dependencies.test.ts` prove the two invalidation behaviours differ.
+
+**13.5 Provider replacement replaces dependents; it never rebinds them.** A
+dependent captured one internally consistent provider set at admission.
+Rebinding it mid-life would let a resource observe two generations of its
+provider — the exact race applications write by hand and get wrong.
+*Evidence:* `test/environmentIsolation.test.ts`, `test/dependencies.test.ts`.
+
+**13.6 Commit is non-blocking and non-convergent.** A Foldkit Message or an
+HTTP handler must not be held open by resource latency; convergence happens
+after. It rules out an `awaitConvergence` in the commit path — applications
+that need to know whether something is up ask `status`. *Evidence:*
+`test/commit.test.ts`, including the linearization-point tests.
+
+**13.7 Ambiguous `many` providers are rejected.** With a `many` provider there
+is no single defensible answer to "which one?", and inventing one — first,
+newest, matching key — would bake a selection policy into the kernel before any
+real workload asked for it. *Reconsider when* a real migration repeatedly needs
+`Document[foo] requires LanguageServer[typescript]`; an explicit selection
+mechanism is then the answer, not a default (§16). *Evidence:*
+`test/dependencies.test.ts`.
+
+**13.8 Retry is explicit, never key pollution.** The alternatives all put
+operational state into domain identity: a retry nonce in the key, withdrawing
+and restoring desire, or an unrelated model change. The comparison in
+`examples/foldkit` measures this precisely — the hand-written version threads a
+`serverAttempt` counter into its resource requirements; the reconciler version
+needs nothing. *Evidence:* §6.6, §9.3, `test/retry.test.ts`,
+`examples/foldkit/scenario.test.ts`.
+
+**13.9 Observability is semantic, and status outranks events.** An application
+that turns a failure into UI state must be able to recover that state after a
+missed notification, or the notification becomes a second source of truth that
+can drift. Publication must never block reconciliation, which forces the stream
+to be lossy — so it cannot be the authority. *Evidence:* §9.2,
+`test/observation.test.ts`.
+
+**13.10 Semantic keys are ordinary Effect values.** The earlier design made
+every family declare an injective string encoding, which put escaping and
+collision-safety on the user: two adversarial component encodings could collide
+and silently merge two lifetimes. With structural identity there is no encoding
+to collide inside, and a key is just a value. It rules out serialization as the
+primary identity mechanism. An earlier draft also rejected function keys
+outright as `UnstableKey`; that was removed, because a function carrying
+`Equal`/`Hash` is a perfectly good structural key and the check caught only one
+member of a class of user error it could not detect in general. *Evidence:*
+§3.2, `test/identity.test.ts`, `test/misuse.test-d.ts`, `bench/RESULTS.md`.
+
+**13.11 Expected failures are tagged data; defects stay defects.** A caller
+recovering from "this provider is ambiguous" should not be matching on a
+string. Tagged cases make `catchTags` exhaustive and give each case its own
+fields; formatting becomes presentation. Implementation bugs remain defects
+rather than joining a broad recoverable error. *Evidence:* §10,
+`test/errors.test.ts` handles the whole algebra in one `catchTags`.
+
+**13.12 `None` is not an error.** `status` returning `None` deliberately covers
+both "not desired" and "not yet admitted": what was asked for is in the
+application's own state, and duplicating it in the runtime would create a
+second copy to keep in sync. *Evidence:* §9.1, `test/observation.test.ts`.
+
+**13.13 Optimization waits for measured pressure.** See §15.
+
+## 14. Conformance
+
+`test/` is the executable contract. It proves:
+
+- equal keys retain physical lifetimes; changed keys replace them
+  (`identity.test.ts`);
+- equivalent commits create zero lifecycle churn (`identity.test.ts`);
+- `many` keys reconcile independently — add, retain, remove
+  (`identity.test.ts`);
+- owner replacement closes all descendants structurally, children wait for
+  their owner to be Running, and identity is owner-relative
+  (`ownership.test.ts`);
+- provider replacement invalidates dependents only, failed providers prevent
+  dependent admission, and provider generations never mix
+  (`dependencies.test.ts`, `environmentIsolation.test.ts`);
+- startup is interruptible, and late startup completion never resurrects an
+  obsolete lifetime (`ownership.test.ts`, `shutdown.test.ts`);
+- sequential replacement preserves exclusivity with latest-state coalescing;
+  overlap replacement permits safe coexistence (`replacement.test.ts`);
+- commits linearize, publish atomically, and never await convergence
+  (`commit.test.ts`);
+- shutdown is idempotent, interrupts startups and awaits structured
+  finalization; commits after shutdown fail with `ControllerClosed`
+  (`shutdown.test.ts`);
+- one Definition binds to multiple state types (`identity.test.ts`);
+- semantic keys are ordinary Effect values compared with `Equal`/`Hash`, so
+  structural keys need no encoding and cannot collide (`identity.test.ts`);
+- a failed lifetime holds its slot, so recommitting the same state is not an
+  implicit retry, and `retry` retires the failed generation under the same key
+  (`failure.test.ts`, `retry.test.ts`);
+- owned selectors see the whole semantic owner path, so identical direct-owner
+  keys under different ancestors stay distinct (`identity.test.ts`);
+- startup environments are typed, and type-level misuse is rejected
+  (`misuse.test-d.ts`);
+- ordinary Effect stays ordinary inside `start`: transient retry schedules and
+  Layer building work unchanged (`effectNative.test.ts`).
+
+Concurrency tests use deterministic Effect synchronization — `Deferred`,
+`Semaphore`, explicit gates, a test-only convergence barrier — rather than
+sleeps. Real-time windows appear only where the *absence* of an event must be
+observed and no stronger synchronization exists.
+
+## 15. Performance
+
+Binding evaluation and the reconcile sweep are O(N) per commit. There are no
+dirty-slot queues, dirty-family queues, incremental selector graphs or reverse
+invalidation schedulers.
+
+The benchmark (`bench/RESULTS.md`, 100 / 1k / 10k lifetimes) shows churn is
+already scale-invariant and selective: zero churn on an equivalent commit, two
+starts and two stops for one changed document whether there are 100 or 10,000.
+What scales with N is selector evaluation — at 10,000 lifetimes a no-op commit
+is ~8 ms at p50 and ~19 ms at p95, paid at the caller's boundary rather than
+holding the controller, with ~22 ms of background convergence behind it. At
+editor scale, hundreds to low thousands, commit is under a millisecond.
+
+Effect-native key identity costs 10–25% against the encoded-string scheme it
+replaced, at identical churn; three snapshot-local memoizations closed an
+initial 2× gap without adding incremental dependency tracking. Adding
+incremental machinery now would trade a simple, provably correct pass for
+cache-invalidation bugs against no measured need.
+
+*Reconsider when* a real workload shows selector evaluation or the reconcile
+sweep consuming a meaningful share of its frame or latency budget — the p95
+commit column is the one to watch, not the median. Correctness must never
+depend on such an optimization: the semantic contract stays
+full-snapshot-equivalent.
+
+## 16. Scope boundary and the open decision
+
+### 16.1 Deferred from v0
+
+Not implemented, deliberately: the snapshot API, diagnostics and DevTools, a
+stable reconciliation event stream, supervision and retry policy DSLs,
+incremental selectors, nested Reconcilers, and package publishing polish.
+
+Out of scope entirely: query caching, stale-time policies, actor mailboxes,
+durable workflows, distributed orchestration, remote reconciliation, automatic
+dependency discovery, arbitrary capability cycles, renderer, router, forms, HMR
+and general signal reactivity. For every proposed feature the question is
+whether it is necessary for *state-reconciled keyed Effect lifetimes*.
+
+Pressure worth tracking before adding anything: `many`-provider selection,
+cross-owner provider selection, and dynamic provider matching (§13.7).
+
+### 16.2 What has been validated
+
+The kernel passes the conformance suite against real Effect interruption and
+finalization, and `examples/foldkit` builds one editor-diagnostics feature
+twice — idiomatic Foldkit against a Reconciler Definition, same backend, same
+race tests — measuring coordination SLOC −57%, lifecycle-only Model fields
+5→0, lifecycle-only Message variants 5→2 and app-owned race tests 5→0.
+`examples/foldkit-migration` moves an upstream Foldkit example onto the runtime
+and reports that on a *single flat resource* — no ownership, no dependencies,
+no keyed children — the migration is 35% larger.
+
+Both are honest about their limits: the first feature was written for the
+comparison, and the second is exactly the shape this design does not claim to
+improve. Neither substitutes for migrating a keyed or nested feature of a
+production application, which is what the decision below still needs.
+
+### 16.3 GO / SHRINK / STOP
+
+Continue toward a public package if a real migration shows lifecycle-only Model
+state and Messages materially decreasing, manual provider invalidation
+disappearing, generic race logic moving into the runtime, same-key retry
+working without domain-state pollution, application code remaining ordinary
+Effect with few escape hatches, reasonable adoption cost, acceptable scale, and
+users understanding Definition + Binding + Controller without learning internal
+mechanics. A useful target is a 30–50% reduction in lifecycle-specific
+application code, with a much larger reduction in manual race-handling rules.
+
+Shrink toward Foldkit-specific infrastructure or a smaller Effect helper if
+most of the value appears only inside Foldkit, if reusable Definition/Binding
+separation adds little in practice, if generic capability DAGs are rare, or if
+`RcMap`/`LayerMap` plus a small helper removes most of the real coordination.
+
+Stop if application code is not clearly simpler, if lifecycle bookkeeping
+merely moves rather than disappears, if escape hatches are frequently needed,
+if failure and status synchronization creates a second application-state
+system, if service typing becomes less Effect-native, or if common use cases
+force actor or workflow scope. The goal is not to justify the abstraction at
+all costs.
+
+### 16.4 Before publication
+
+Only after a positive production migration: package metadata (`exports`,
+`types`, `files`, `sideEffects`, `repository`, `license`, `keywords`,
+`engines`, `publishConfig`), an intentional build output, Effect kept as a peer
+dependency to avoid duplicate runtime identity, an experimental `0.x` release
+that names retry, observability and diagnostics as unstable, and documentation
+covering the 30-second mental model, root `one`, ownership, `many`, capability
+dependencies, failure and retry, Foldkit integration, the comparison with
+`RcMap`/`LayerMap`, the non-goals, and the concurrency guarantees.
