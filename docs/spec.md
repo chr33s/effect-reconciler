@@ -514,6 +514,7 @@ interface Controller<State> {
   readonly retry: (ref: LifetimeRef) => Effect<void, ControllerClosed>
   readonly status: (ref: LifetimeRef) => Effect<Option<LifetimeStatus>>
   readonly failures: Stream<LifetimeFailure>
+  readonly changes: Stream<void>
   readonly shutdown: Effect<void>
 }
 ```
@@ -578,6 +579,41 @@ that fails again reports a fresh failure.
 No semantic API exposes a Scope, Fiber, Context, physical generation, reconcile
 revision, live slot or instance, mutable internal map, or internal desired
 revision.
+
+### 9.5 Changes are a prompt, not a payload
+
+```ts
+controller.changes    // Stream<void>
+```
+
+> Emits whenever a reconcile pass left something `status` could report
+> different from how it found it.
+
+The signal carries nothing. That is what keeps it on the right side of §9.4:
+it names no lifetime, no generation and no transition, so a subscriber learns
+only that re-reading is worth doing and must go back through `status` — which
+stays the sole authority — to learn anything at all. It exists because
+`failures` reports failures and nothing else, so `Starting → Running` had no
+notification of any kind and an observer had no option but to poll.
+
+Its contract:
+
+- a pass that moved nothing observable emits nothing, so a converged
+  controller is silent — this is the property a timer cannot have;
+- transitions coalesce freely: several changes may arrive as one signal,
+  because a signal means "read again", and reading again answers for all of
+  them;
+- a new subscription is prompted once if anything has ever been signalled, so
+  an observer cannot be left holding a reading it took before a transition it
+  had not yet subscribed for;
+- a subscriber is never blocked on, and never blocks reconciliation;
+- subscriptions are Scope-owned;
+- a transition is signalled when it happens, not when the finalizers it
+  triggered complete.
+
+It promises nothing about *when* anything converges. §8.3 still holds: commit
+does not await convergence, and an edge that says "something moved" says
+nothing about how long anything took or will take.
 
 ## 10. Errors
 
@@ -770,7 +806,21 @@ both "not desired" and "not yet admitted": what was asked for is in the
 application's own state, and duplicating it in the runtime would create a
 second copy to keep in sync. *Evidence:* §9.1, `test/observation.test.ts`.
 
-**13.13 Optimization waits for measured pressure.** See §15.
+**13.13 A change signal carries nothing.** Every richer design for
+`changes` — the lifetime that moved, its old and new status, a reconciliation
+event log — makes the stream a second source of truth, and a lossy one, which
+§13.9 has already ruled out for failures for exactly the same reason. A
+payload-free edge cannot drift from `status`, because it says nothing `status`
+could contradict; it cannot leak topology, because it names nothing; and it
+can coalesce without losing information, because "read again" answers for any
+number of transitions at once. What it buys is the whole difference between an
+observer that polls and one that does not, which is a UI adapter's single
+largest cost. The one concession is the prompt replayed to a new subscriber:
+without it, subscribing and taking a first reading cannot be ordered safely,
+and an observer could sit forever on a reading taken a moment too early.
+*Evidence:* §9.5, `test/observation.test.ts`, `examples/ui/mirror.ts`.
+
+**13.14 Optimization waits for measured pressure.** See §15.
 
 ## 14. Conformance
 
@@ -806,6 +856,9 @@ second copy to keep in sync. *Evidence:* §9.1, `test/observation.test.ts`.
   keys under different ancestors stay distinct (`identity.test.ts`);
 - startup environments are typed, and type-level misuse is rejected
   (`misuse.test-d.ts`);
+- change signals report every transition `status` can report and stay silent
+  through an equivalent commit, coalesce under a one-slot subscription, and
+  prompt a late or racing subscriber exactly once (`observation.test.ts`);
 - ordinary Effect stays ordinary inside `start`: transient retry schedules and
   Layer building work unchanged (`effectNative.test.ts`).
 
@@ -840,13 +893,19 @@ commit column is the one to watch, not the median. Correctness must never
 depend on such an optimization: the semantic contract stays
 full-snapshot-equivalent.
 
-## 16. Scope boundary and the open decision
+## 16. Scope boundary and the decision
 
 ### 16.1 Deferred from v0
 
 Not implemented, deliberately: the snapshot API, diagnostics and DevTools, a
 stable reconciliation event stream, supervision and retry policy DSLs,
-incremental selectors, nested Reconcilers, and package publishing polish.
+incremental selectors, and nested Reconcilers.
+
+`Controller.changes` (§9.5) is not the reconciliation event stream this list
+defers, and does not become it. A stream of *events* — what moved, from which
+state to which — would be a second, lossy source of truth about the same
+lifetimes `status` already answers for; a payload-free prompt cannot be,
+because it says nothing `status` could contradict (§13.13).
 
 Out of scope entirely: query caching, stale-time policies, actor mailboxes,
 durable workflows, distributed orchestration, remote reconciliation, automatic
@@ -864,45 +923,89 @@ finalization, and `examples/foldkit` builds one editor-diagnostics feature
 twice — idiomatic Foldkit against a Reconciler Definition, same backend, same
 race tests — measuring coordination SLOC −57%, lifecycle-only Model fields
 5→0, lifecycle-only Message variants 5→2 and app-owned race tests 5→0.
-`examples/foldkit-migration` moves an upstream Foldkit example onto the runtime
-and reports that on a *single flat resource* — no ownership, no dependencies,
-no keyed children — the migration is 35% larger.
+`examples/foldkit-migration` moves an upstream Foldkit example app onto the
+runtime and reports that on a *single flat resource* — no ownership, no
+dependencies, no keyed children — the migration is 35% larger.
 
-Both are honest about their limits: the first feature was written for the
-comparison, and the second is exactly the shape this design does not claim to
-improve. Neither substitutes for migrating a keyed or nested feature of a
-production application, which is what the decision below still needs.
+`examples/ui` adds a third kind of evidence: three adapters (React, Solid,
+Lit) over one shared mirror of `Controller.status`, none of which required the
+mirror to change. It is also the only example that has changed the kernel. It
+was built against a runtime with no change notification, so its mirror polled;
+that made the cost of the missing signal concrete rather than hypothetical,
+and `Controller.changes` (§9.5) is the result. The order matters as a method:
+the adapter came first, the kernel change second, and the example now asserts
+that no read happens across an idle window.
+
+Each is honest about its limits. The first feature was written for the
+comparison; the second is exactly the shape this design does not claim to
+improve; the third exercises observation and commit but no deep ownership.
+None of them substitutes for migrating a keyed or nested feature of a
+production application, which is what the decision below turned on.
 
 ### 16.3 GO / SHRINK / STOP
 
-Continue toward a public package if a real migration shows lifecycle-only Model
-state and Messages materially decreasing, manual provider invalidation
-disappearing, generic race logic moving into the runtime, same-key retry
-working without domain-state pollution, application code remaining ordinary
-Effect with few escape hatches, reasonable adoption cost, acceptable scale, and
-users understanding Definition + Binding + Controller without learning internal
-mechanics. A useful target is a 30–50% reduction in lifecycle-specific
-application code, with a much larger reduction in manual race-handling rules.
+**Decided: GO.**
 
-Shrink toward Foldkit-specific infrastructure or a smaller Effect helper if
-most of the value appears only inside Foldkit, if reusable Definition/Binding
-separation adds little in practice, if generic capability DAGs are rare, or if
-`RcMap`/`LayerMap` plus a small helper removes most of the real coordination.
+The criteria were: lifecycle-only Model state and Messages materially
+decreasing, manual provider invalidation disappearing, generic race logic
+moving into the runtime, same-key retry working without domain-state
+pollution, application code remaining ordinary Effect with few escape hatches,
+reasonable adoption cost, acceptable scale, and users understanding
+Definition + Binding + Controller without learning internal mechanics — with a
+30–50% reduction in lifecycle-specific application code as the target, and a
+much larger reduction in manual race-handling rules.
 
-Stop if application code is not clearly simpler, if lifecycle bookkeeping
-merely moves rather than disappears, if escape hatches are frequently needed,
-if failure and status synchronization creates a second application-state
-system, if service typing becomes less Effect-native, or if common use cases
-force actor or workflow scope. The goal is not to justify the abstraction at
-all costs.
+The production migration this document had been waiting for was carried out on
+a keyed feature and reported positive against those criteria; the maintainer's
+call on that evidence is recorded here as the decision. What is reproducible in
+this repository is the examples above, and they are what a reader should judge
+the claim by — the migration itself is not public, so no numbers from it are
+quoted as if they were.
 
-### 16.4 Before publication
+Two findings from the examples are worth carrying forward as the known adoption
+costs, neither of which changed the decision:
 
-Only after a positive production migration: package metadata (`exports`,
-`types`, `files`, `sideEffects`, `repository`, `license`, `keywords`,
-`engines`, `publishConfig`), an intentional build output, Effect kept as a peer
-dependency to avoid duplicate runtime identity, an experimental `0.x` release
-that names retry, observability and diagnostics as unstable, and documentation
-covering the 30-second mental model, root `one`, ownership, `many`, capability
-dependencies, failure and retry, Foldkit integration, the comparison with
-`RcMap`/`LayerMap`, the non-goals, and the concurrency guarantees.
+- **A flat, unowned, dependency-free resource is not worth migrating.** The
+  runtime charges a Definition and a Binding for coordination that such a
+  resource does not need. `RcMap` or `LayerMap` plus a small helper is the
+  better answer there, and §12.3 says so.
+- **There is still no way to use a lifetime's published services from outside
+  a lifetime.** Both `examples/foldkit-migration` and `examples/ui` hit it and
+  work around it with a holder `Ref`. It remains deliberately unaddressed: a
+  caller holding a service whose generation has been retired is exactly what
+  §6.3 exists to prevent, and no design has yet been found that gives outside
+  access without giving that away. Until one is, the rule is: render and
+  decide off `status`, act through `commit` and `retry`.
+
+The SHRINK and STOP branches remain the ones to re-read if that changes — if
+most of the value turns out to live inside one control plane, if lifecycle
+bookkeeping merely moves rather than disappears, if escape hatches become
+frequent, or if failure and status synchronization starts to be a second
+application-state system. The goal was never to justify the abstraction at all
+costs.
+
+### 16.4 Publication
+
+Done, on the strength of §16.3:
+
+- package metadata — `exports` (the eight public modules and the root; nothing
+  under `internal/` is reachable through it), `types`, `files`, `sideEffects`,
+  `repository`, `license`, `keywords`, `engines`, `publishConfig`;
+- an intentional build output: `tsconfig.build.json` emits ESM, declarations,
+  declaration maps and source maps to `dist/`, and the tarball ships `src/`
+  alongside so both kinds of map resolve to real code. `prepack` runs check,
+  lint, test and build, so nothing publishes that has not passed all four;
+- Effect stays a **peer** dependency. A second copy in a consumer's tree is a
+  second runtime identity, and services published by a lifetime would not be
+  the services the consumer's code asks for;
+- an experimental `0.x` release. `Definition`, `Binding`, `commit`, `status`
+  and `shutdown` are what the README tells a reader to build on; `retry`,
+  `failures`, `changes` and everything else about observability and
+  diagnostics are named unstable and may change shape within `0.x`;
+- documentation covering the 30-second mental model, root `one`, ownership,
+  `many`, capability dependencies, failure and retry, control-plane
+  integration including Foldkit, the comparison with `RcMap`/`LayerMap`, the
+  non-goals, and the concurrency guarantees together with the non-guarantees.
+
+What `0.x` does not carry, and what a `1.0` would have to answer for, is
+§16.1's deferred list and the two adoption costs in §16.3.

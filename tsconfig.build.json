@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/@effect/tsgo/schema.json",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "removeComments": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": [],
+    "lib": ["ES2022"]
+  },
+  "include": ["src"]
+}

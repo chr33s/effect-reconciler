@@ -28,6 +28,12 @@
  * anywhere. That also means the mirror imposes no runtime of its own on the
  * host application.
  *
+ * **Nothing here polls.** The mirror re-reads when `Controller.changes` says
+ * reconciliation moved something and at no other time, so an idle screen
+ * costs nothing and a transition is reflected as soon as the pass that caused
+ * it ends. Because a fresh subscription is prompted once, the mirror cannot
+ * be left holding a reading taken before a transition it did not see.
+ *
  * **Commits coalesce.** A UI can produce state faster than resources can
  * converge, so `commit` records the latest state rather than queueing every
  * one. Committing A then B is indistinguishable from committing B alone:
@@ -41,10 +47,6 @@ import type { Controller } from "../../src/Reconciler.js"
 import type { LifetimeStatus } from "../../src/Status.js"
 
 export interface MirrorOptions {
-  /** How often to re-read while something is still converging. */
-  readonly activeIntervalMillis?: number
-  /** How often to re-read once nothing watched is in transition. */
-  readonly idleIntervalMillis?: number
   /**
    * A commit that fails means a selector threw or produced a duplicate key —
    * a bug in the application, not a runtime condition. It is reported here
@@ -64,8 +66,8 @@ export interface StatusMirror {
    * Watch one lifetime and be told when its status may have changed. Returns
    * the unwatch function, which is exactly the shape `useSyncExternalStore`
    * wants, and what a Solid effect and a Lit controller each return from their
-   * own teardown. Only watched lifetimes are polled, so the work is bounded by
-   * what is on screen.
+   * own teardown. Only watched lifetimes are re-read, so a change signal costs
+   * what is on screen and nothing more.
    */
   readonly watch: (ref: LifetimeRef, listener: () => void) => () => void
   /** The cached status. Pure: it registers nothing and notifies no one. */
@@ -74,7 +76,7 @@ export interface StatusMirror {
   readonly retry: (ref: LifetimeRef) => void
   /**
    * Apply everything pending and re-read every watched lifetime. Tests use
-   * this instead of sleeping; the background loops call exactly the same
+   * this instead of sleeping; both background fibers call exactly the same
    * effect.
    */
   readonly flush: Effect.Effect<void>
@@ -90,16 +92,11 @@ interface Entry {
   readonly listeners: Set<() => void>
 }
 
-const isTransitional = (status: Option.Option<LifetimeStatus>): boolean =>
-  Option.isSome(status) && (status.value._tag === "Starting" || status.value._tag === "Stopping")
-
 export const make = <State>(
   controller: Controller<State>,
   options: MirrorOptions = {}
 ): Effect.Effect<Mirror<State>, never, import("effect/Scope").Scope> =>
   Effect.gen(function* () {
-    const activeInterval = options.activeIntervalMillis ?? 25
-    const idleInterval = options.idleIntervalMillis ?? 250
     const onCommitError = options.onCommitError ??
       ((error: CommitError) => {
         setTimeout(() => {
@@ -111,13 +108,10 @@ export const make = <State>(
     // Written by UI handlers, drained by the work loop.
     let pendingState: Option.Option<State> = Option.none()
     let pendingRetries: Array<LifetimeRef> = []
-    // True while a commit may still be converging, so polling stays fast even
-    // when nothing watched has reached a transitional state yet.
-    let settling = false
 
     const work = yield* Latch.make(false)
-    // One refresh at a time: the work loop, the poll loop and the failure
-    // stream all drive the same read.
+    // One refresh at a time: the work loop and the change stream drive the
+    // same read.
     const exclusive = (yield* Semaphore.make(1)).withPermits(1)
 
     const requestWork = (): void => {
@@ -136,31 +130,23 @@ export const make = <State>(
       pendingRetries = []
 
       if (Option.isSome(state)) {
-        settling = true
         const committed = yield* Effect.result(controller.commit(state.value))
         if (committed._tag === "Failure") onCommitError(committed.failure)
       }
       for (const ref of retries) {
-        settling = true
         yield* Effect.ignore(controller.retry(ref))
       }
 
-      let changed = false
-      let transitional = false
       // Snapshot the keys: a component may unwatch while this pass is reading,
       // and refreshing a lifetime nobody watches any more is merely wasted.
       for (const ref of [...MutableHashMap.keys(entries)]) {
         const entry = Option.getOrUndefined(MutableHashMap.get(entries, ref))
         if (entry === undefined) continue
         const next = yield* controller.status(ref)
-        transitional = transitional || isTransitional(next)
         if (Equal.equals(entry.status, next)) continue
         entry.status = next
-        changed = true
         notify(entry)
       }
-      // Quiet: a whole pass with nothing changing and nothing in transition.
-      if (settling && !changed && !transitional) settling = false
     })
 
     const flush = exclusive(flushOnce)
@@ -172,24 +158,15 @@ export const make = <State>(
       )
     )
 
-    // Polling is the v0 change signal: `Controller.failures` reports failures
-    // only, and there is no notification for `Starting → Running`. A
-    // `Controller.changes` stream would replace this loop entirely.
-    yield* Effect.forkScoped(
-      Effect.forever(
-        Effect.andThen(
-          Effect.suspend(() =>
-            Effect.sleep(settling || MutableHashMap.size(entries) === 0 ? activeInterval : idleInterval)
-          ),
-          flush
-        )
-      )
-    )
-
-    // Failures are taken as a signal, not as a payload: the delivery contract
-    // makes `status` authoritative and the stream best-effort, so the mirror
-    // re-reads rather than trusting what it was handed.
-    yield* Effect.forkScoped(Stream.runForEach(controller.failures, () => flush))
+    // The only reason the mirror ever re-reads. The signal carries nothing, so
+    // there is no question of trusting what it was handed: it re-reads
+    // `status`, which is the authority, exactly when something moved.
+    //
+    // This subscription also replaces the one the mirror used to keep on
+    // `Controller.failures` — a failed startup is a transition like any other
+    // and is signalled here, so watching both would only mean flushing twice
+    // for one event.
+    yield* Effect.forkScoped(Stream.runForEach(controller.changes, () => flush))
 
     const statusOf = (ref: LifetimeRef): Option.Option<LifetimeStatus> =>
       Option.match(MutableHashMap.get(entries, ref), {
@@ -203,8 +180,9 @@ export const make = <State>(
         { status: Option.none<LifetimeStatus>(), listeners: new Set<() => void>() }
       if (Option.isNone(existing)) {
         MutableHashMap.set(entries, ref, entry)
-        // A newly watched lifetime reads `None` until the first refresh lands,
-        // so ask for one now rather than at the next poll.
+        // A newly watched lifetime reads `None` until the first refresh
+        // lands, and no change signal is owed for a lifetime that did not
+        // change — so ask for one now.
         requestWork()
       }
       entry.listeners.add(listener)

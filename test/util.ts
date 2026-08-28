@@ -86,6 +86,48 @@ export const drainFailures = (
     }
   })
 
+/**
+ * Subscribe to a Controller's change Stream, returning a queue the test can
+ * pull from. Like `failureQueue`, subscribing eagerly means a commit made
+ * after this returns cannot race the subscription.
+ */
+export const changeQueue = <State>(
+  controller: Reconciler.Controller<State>,
+  options: { readonly capacity: number; readonly strategy?: "dropping" | "sliding" } = {
+    capacity: 512
+  }
+): Effect.Effect<Queue.Dequeue<void, Cause.Done>, never, Scope.Scope> =>
+  Stream.toQueue(controller.changes, options)
+
+/** How many change signals are queued right now. */
+export const drainChanges = (
+  queue: Queue.Dequeue<void, Cause.Done>
+): Effect.Effect<number> =>
+  Effect.gen(function* () {
+    let received = 0
+    while (true) {
+      const next = yield* Effect.timeoutOption(Effect.result(Queue.take(queue)), 20)
+      if (Option.isNone(next) || next.value._tag === "Failure") return received
+      received++
+    }
+  })
+
+/**
+ * Wait for the next change signal. Tests use this instead of `awaitStatus`
+ * wherever the point is that the signal itself is sufficient — an observer
+ * that re-reads only when woken must never be left holding a stale answer.
+ */
+export const awaitChange = (
+  queue: Queue.Dequeue<void, Cause.Done>
+): Effect.Effect<void, TestTimeout> =>
+  Effect.flatMap(
+    Effect.timeoutOption(Effect.result(Queue.take(queue)), 2000),
+    (taken) =>
+      Option.isNone(taken)
+        ? Effect.fail(new TestTimeout({ message: "no change signal within 2s" }))
+        : Effect.void
+  )
+
 /** The status tag of one lifetime, or `"None"` when no generation exists. */
 export const statusTag = <State>(
   controller: Reconciler.Controller<State>,

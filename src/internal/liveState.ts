@@ -74,19 +74,30 @@ export interface Slot {
  * reconcile pass asks about them: by replacement slot, by semantic identity,
  * and as a whole.
  *
- * These indexes are only ever moved by `track`, `retire` and `forget` below.
- * Keeping them consistent is the invariant of this module and of nothing else.
+ * These indexes are only ever moved by `track`, `retire` and `forget` below,
+ * and lifecycle state only ever changes through those three and
+ * `concludeStartup`. Keeping the indexes consistent — and `version` honest
+ * about them — is the invariant of this module and of nothing else.
  */
 export interface LiveState {
   readonly slots: MutableHashMap.MutableHashMap<Ident, Slot>
   readonly currentByIdent: MutableHashMap.MutableHashMap<Ident, LiveInstance>
   readonly all: Set<LiveInstance>
+  /**
+   * Counts the transitions that can change what `Controller.status` answers
+   * for some semantic identity: a generation tracked, retired, forgotten, or
+   * moved between lifecycle states. It is not a revision of anything the
+   * application named — only a witness that re-reading `status` could now say
+   * something different, which is exactly what `Controller.changes` reports.
+   */
+  version: number
 }
 
 export const makeLiveState = (): LiveState => ({
   slots: MutableHashMap.empty(),
   currentByIdent: MutableHashMap.empty(),
-  all: new Set()
+  all: new Set(),
+  version: 0
 })
 
 /** A generation that has lost authority and is on its way out. */
@@ -131,6 +142,7 @@ export const retiringInstance = (
 
 /** Record a freshly admitted generation as the one answering for its identity. */
 export const track = (live: LiveState, inst: LiveInstance): void => {
+  live.version++
   slotFor(live, inst.slot).current = inst
   MutableHashMap.set(live.currentByIdent, inst.ident, inst)
   live.all.add(inst)
@@ -145,6 +157,7 @@ export const track = (live: LiveState, inst: LiveInstance): void => {
  * here, so the replacement policy governs them identically.
  */
 export const retire = (live: LiveState, inst: LiveInstance): void => {
+  live.version++
   inst.status = "stopping"
   const slot = slotFor(live, inst.slot)
   if (slot.current === inst) slot.current = undefined
@@ -154,9 +167,26 @@ export const retire = (live: LiveState, inst: LiveInstance): void => {
   }
 }
 
+/**
+ * The lifecycle transitions a startup completion decides. They move no index
+ * — the generation already answers for its identity — but they change what
+ * `status` reports about it, so they belong to this module for the same
+ * reason the index moves do: it is the only place the observable version is
+ * kept honest. Retirement has its own transition above.
+ */
+export const concludeStartup = (
+  live: LiveState,
+  inst: LiveInstance,
+  status: "running" | "failed"
+): void => {
+  live.version++
+  inst.status = status
+}
+
 /** Drop every trace of a generation that has reached its finalization
  * boundary. The inverse of `track` and `retire` together. */
 export const forget = (live: LiveState, inst: LiveInstance): void => {
+  live.version++
   live.all.delete(inst)
   const slot = slotOf(live, inst.slot)
   if (slot !== undefined) {

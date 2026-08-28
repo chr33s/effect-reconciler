@@ -11,7 +11,10 @@ import { describe, expect, it } from "@effect/vitest"
 import { Cause, Deferred, Effect, Option } from "effect"
 import * as Reconciler from "../src/Reconciler.js"
 import {
+  awaitChange,
   awaitStatus,
+  changeQueue,
+  drainChanges,
   drainFailures,
   failureQueue,
   idle,
@@ -251,5 +254,194 @@ describe("failure stream", () => {
       const receivedKeys = received.map((failure) => failure.lifetime.key)
       expect(receivedKeys.length).toBeLessThan(keys.length)
       expect(receivedKeys).not.toContain(keys[0])
+    }))
+})
+
+/**
+ * The change stream (spec §9.5). It exists so an observer can re-read on
+ * notice rather than on a timer, so the properties that matter are the two an
+ * observer's correctness rests on: a signal is never *late* (after it, a
+ * re-read sees the transition that caused it) and never *spurious* (a
+ * controller that moved nothing says nothing, which is what a poll loop
+ * cannot do).
+ */
+describe("change stream", () => {
+  it.live("§9.5 — signals every transition status can report, Starting → Running included", () =>
+    Effect.gen(function* () {
+      const startGate = yield* Deferred.make<void>()
+      const stopGate = yield* Deferred.make<void>()
+      const Def = Reconciler.define((define) => ({
+        Res: define.one("Res", {
+          start: (_key: string) =>
+            Effect.gen(function* () {
+              yield* Effect.addFinalizer(() => Deferred.await(stopGate))
+              yield* Deferred.await(startGate)
+            })
+        })
+      }))
+      const controller = yield* Reconciler.make(
+        Def.bind<{ readonly on: boolean }>((bind) => ({
+          res: bind.one(Def.Res, (s) => (s.on ? Option.some("a") : Option.none()))
+        }))
+      )
+      const ref = Reconciler.ref(Def.Res, "a", null)
+      const changes = yield* changeQueue(controller)
+
+      // Admission. The signal arrives after the pass that tracked the
+      // generation, so a re-read cannot still say `None`.
+      yield* controller.commit({ on: true })
+      yield* awaitChange(changes)
+      expect(yield* statusTag(controller, ref)).toBe("Starting")
+
+      // The transition that has no other notification at all: nothing on the
+      // failure stream reports a successful startup, which is exactly why an
+      // observer without this signal had to poll.
+      yield* Deferred.succeed(startGate, void 0)
+      yield* awaitChange(changes)
+      expect(yield* statusTag(controller, ref)).toBe("Running")
+
+      // Retirement, while the finalizer is still blocked.
+      yield* controller.commit({ on: false })
+      yield* awaitChange(changes)
+      expect(yield* statusTag(controller, ref)).toBe("Stopping")
+
+      // And the finalization boundary, which drops the generation entirely.
+      yield* Deferred.succeed(stopGate, void 0)
+      yield* awaitChange(changes)
+      yield* idle(controller)
+      expect(yield* statusTag(controller, ref)).toBe("None")
+    }))
+
+  it.live("§9.5 — signals a failed startup without waiting on its finalizers", () =>
+    Effect.gen(function* () {
+      const finalizerGate = yield* Deferred.make<void>()
+      const Def = Reconciler.define((define) => ({
+        Res: define.one("Res", {
+          start: (_key: string) =>
+            Effect.gen(function* () {
+              // A partial resource whose cleanup is wedged. The Failed status
+              // is a fact as soon as startup returns; making the signal wait
+              // for this finalizer would report a transition long after any
+              // observer could have acted on it — or never.
+              yield* Effect.addFinalizer(() => Deferred.await(finalizerGate))
+              return yield* new StartupFailed({ reason: "boom" })
+            })
+        })
+      }))
+      const controller = yield* Reconciler.make(
+        Def.bind<{}>((bind) => ({ res: bind.one(Def.Res, () => Option.some("a")) }))
+      )
+      const changes = yield* changeQueue(controller)
+
+      yield* controller.commit({})
+      yield* awaitChange(changes)
+      yield* awaitChange(changes)
+      expect(yield* statusTag(controller, Reconciler.ref(Def.Res, "a", null))).toBe("Failed")
+
+      yield* Deferred.succeed(finalizerGate, void 0)
+    }))
+
+  it.live("§9.5 — an equivalent commit signals nothing", () =>
+    Effect.gen(function* () {
+      const Def = Reconciler.define((define) => ({
+        Res: define.many("Res", { start: (_key: string) => Effect.void })
+      }))
+      const controller = yield* Reconciler.make(
+        Def.bind<{ readonly keys: ReadonlyArray<string> }>((bind) => ({
+          res: bind.many(Def.Res, (s) => s.keys)
+        }))
+      )
+      const changes = yield* changeQueue(controller)
+
+      yield* controller.commit({ keys: ["a", "b"] })
+      yield* idle(controller)
+      expect(yield* drainChanges(changes)).toBeGreaterThan(0)
+
+      // Equivalent desire, expressed by a different array: zero churn, and so
+      // nothing to say about it. A poll loop cannot distinguish this case,
+      // which is the whole cost the signal removes.
+      yield* controller.commit({ keys: ["a", "b"] })
+      yield* idle(controller)
+      yield* controller.commit({ keys: ["b", "a"] })
+      yield* idle(controller)
+      expect(yield* drainChanges(changes)).toBe(0)
+
+      // One changed key: signalled again, and selectively.
+      yield* controller.commit({ keys: ["a", "c"] })
+      yield* idle(controller)
+      expect(yield* drainChanges(changes)).toBeGreaterThan(0)
+    }))
+
+  it.live("§9.5 — coalesces under a one-slot subscription and is never lost", () =>
+    Effect.gen(function* () {
+      const Def = Reconciler.define((define) => ({
+        Res: define.many("Res", { start: (_key: string) => Effect.void })
+      }))
+      const controller = yield* Reconciler.make(
+        Def.bind<{ readonly keys: ReadonlyArray<string> }>((bind) => ({
+          res: bind.many(Def.Res, (s) => s.keys)
+        }))
+      )
+      // What an observer that only ever re-reads authoritative state needs:
+      // one slot, sliding. Dropping a signal it has not drained yet costs it
+      // nothing, because the one it does drain sends it to the same place.
+      const changes = yield* changeQueue(controller, { capacity: 1, strategy: "sliding" })
+
+      for (let i = 0; i < 12; i++) {
+        yield* controller.commit({ keys: [`k${i}`] })
+      }
+      yield* idle(controller)
+      yield* awaitChange(changes)
+      expect(yield* statusTag(controller, Reconciler.ref(Def.Res, "k11", null))).toBe("Running")
+      expect(yield* statusTag(controller, Reconciler.ref(Def.Res, "k0", null))).toBe("None")
+    }))
+
+  it.live("§9.5 — a late subscriber is prompted to read, never handed a history", () =>
+    Effect.gen(function* () {
+      const Def = Reconciler.define((define) => ({
+        Res: define.many("Res", { start: (_key: string) => Effect.void })
+      }))
+      const controller = yield* Reconciler.make(
+        Def.bind<{ readonly keys: ReadonlyArray<string> }>((bind) => ({
+          res: bind.many(Def.Res, (s) => s.keys)
+        }))
+      )
+
+      // Four commits, eight transitions, no subscriber for any of them.
+      yield* controller.commit({ keys: ["a"] })
+      yield* controller.commit({ keys: ["b"] })
+      yield* controller.commit({ keys: ["c"] })
+      yield* controller.commit({ keys: ["d"] })
+      yield* idle(controller)
+
+      // What a late subscriber gets is one prompt: enough that it cannot be
+      // left holding a reading taken before those transitions, and no more,
+      // because the signal never carried anything to replay in the first
+      // place. What actually happened is on `status`, as it always was.
+      const changes = yield* changeQueue(controller)
+      expect(yield* drainChanges(changes)).toBe(1)
+      expect(yield* statusTag(controller, Reconciler.ref(Def.Res, "d", null))).toBe("Running")
+      expect(yield* statusTag(controller, Reconciler.ref(Def.Res, "a", null))).toBe("None")
+    }))
+
+  it.live("§9.5 — a transition racing the subscription is not lost", () =>
+    Effect.gen(function* () {
+      const Def = Reconciler.define((define) => ({
+        Res: define.one("Res", { start: (_key: string) => Effect.void })
+      }))
+      const controller = yield* Reconciler.make(
+        Def.bind<{ readonly on: boolean }>((bind) => ({
+          res: bind.one(Def.Res, (s) => (s.on ? Option.some("a") : Option.none()))
+        }))
+      )
+
+      // The window an observer cannot close by ordering alone: the commit is
+      // in flight before the subscription exists. Without the replayed prompt
+      // an observer would read once, see nothing, and wait for a signal that
+      // had already been published.
+      yield* controller.commit({ on: true })
+      const changes = yield* changeQueue(controller)
+      yield* awaitChange(changes)
+      yield* awaitStatus(controller, Reconciler.ref(Def.Res, "a", null), "Running")
     }))
 })

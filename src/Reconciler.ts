@@ -120,6 +120,12 @@ export const ref = <H extends AnyHandle>(
  * model. Running it subscribes; only failures published while it runs are
  * delivered, and the buffer drops the oldest under overflow.
  *
+ * `changes` emits — with no payload — whenever reconciliation moved something
+ * `status` could report, so an observer can re-read on notice instead of
+ * polling. It names nothing, so it exposes nothing `status` does not; and
+ * because it only ever prompts a re-read, coalescing several transitions into
+ * one signal loses no information.
+ *
  * `status` answers authoritatively what the runtime currently knows about one
  * semantic lifetime; unlike a failure notification it cannot be missed.
  * `None` means no physical generation exists for that identity.
@@ -133,6 +139,7 @@ export const ref = <H extends AnyHandle>(
  */
 export interface Controller<in State> {
   readonly commit: (state: State) => Effect.Effect<void, CommitError>
+  readonly changes: Stream.Stream<void>
   readonly failures: Stream.Stream<LifetimeFailure>
   readonly status: (ref: LifetimeRef) => Effect.Effect<Option.Option<LifetimeStatus>>
   readonly retry: (ref: LifetimeRef) => Effect.Effect<void, ControllerClosed>

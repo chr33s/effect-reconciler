@@ -38,7 +38,7 @@ import type { Mirror, StatusMirror } from "./mirror.js"
 /**
  * The runtime's current answer for one lifetime, as a signal. Watching is tied
  * to the owning computation, so a component that stops rendering a lifetime
- * stops the mirror polling it.
+ * stops the mirror re-reading it.
  *
  * The signal keeps 2.0's default reference equality, which is only correct
  * because the mirror returns the *same* status object while nothing has

@@ -166,3 +166,25 @@ What remains is a 10–25% convergence cost at 10,000 lifetimes, against a
 commit path that is unchanged and a public API with no key descriptors in it.
 That was judged worth it. If a real workload ever disagrees, the numbers to
 beat are in this table.
+
+## The change signal costs nothing measurable
+
+`Controller.changes` (`docs/spec.md` §9.5) adds two things to the reconcile
+path: an integer increment inside the four live-state transitions, and, at the
+end of each pass, one integer comparison plus — only when that comparison says
+something moved — a publish into a capacity-1 sliding `PubSub`. Nothing is
+walked, and nothing is allocated per lifetime.
+
+Re-running the table above after adding it reproduces every churn and
+selector-evaluation count exactly, and every timing within the run-to-run
+spread this document already warns about at 10,000 documents. That is a single
+run against a table of three-run medians, so it is evidence that nothing
+regressed by a visible margin, not a new measurement: the table was left as
+recorded rather than overwritten with a less careful one.
+
+The interesting cost is the one that was *removed*, and it is not in this
+table because it was never in the kernel. `examples/ui` previously re-read
+every watched lifetime's status every 250 ms forever, converged or not.
+`examples/ui/mirror.test.ts` now asserts zero reads across a 400 ms idle
+window. For an observer, the change is not a percentage — it is the difference
+between work proportional to time and work proportional to transitions.

@@ -116,19 +116,78 @@ describe("ui mirror", () => {
         const slow = ref("slow.example")
         const gate = yield* Deferred.make<void>()
         behaviour.blocking.set("slow.example", Deferred.await(gate))
-        yield* Effect.sync(() => mirror.watch(slow, () => {}))
+
+        // A wedged startup is exactly the case with no convergence barrier:
+        // `idle` cannot complete while a lifetime is deliberately stuck. The
+        // mirror's own notification is the barrier instead — which is only
+        // possible because the runtime pushes. Waiting on it, rather than on
+        // a clock, is the whole difference this test exists to show.
+        const starting = yield* Deferred.make<void>()
+        const running = yield* Deferred.make<void>()
+        yield* Effect.sync(() =>
+          mirror.watch(slow, () => {
+            const tag = Option.getOrNull(mirror.statusOf(slow))?._tag
+            if (tag === "Starting") Deferred.doneUnsafe(starting, Effect.void)
+            if (tag === "Running") Deferred.doneUnsafe(running, Effect.void)
+          })
+        )
 
         mirror.commit(withHosts("slow.example"))
-        // `idle` never completes while a startup is deliberately wedged, so
-        // this is the one place a real wait is the only option.
-        yield* Effect.sleep(80)
-        yield* mirror.flush
+        yield* Deferred.await(starting)
         expect(Option.getOrNull(mirror.statusOf(slow))?._tag).toBe("Starting")
 
         yield* Deferred.succeed(gate, void 0)
-        yield* Effect.sleep(80)
-        yield* mirror.flush
+        yield* Deferred.await(running)
         expect(Option.getOrNull(mirror.statusOf(slow))?._tag).toBe("Running")
+      })
+    ))
+
+  it.live("re-reads when the runtime says something moved, and at no other time", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const behaviour = makeBehaviour()
+        const definition = defineConnections(behaviour)
+        const controller = yield* Reconciler.make(bindConnections(definition))
+        let reads = 0
+        // Spreading keeps the controller's test hooks, so `idle` still works
+        // through the wrapper; only `status` is instrumented.
+        const counted: typeof controller = {
+          ...controller,
+          status: (target) =>
+            Effect.andThen(
+              Effect.sync(() => {
+                reads++
+              }),
+              controller.status(target)
+            )
+        }
+        const mirror = yield* Mirror.make(counted)
+        const a = connectionRef(definition, "a.example")
+        yield* Effect.sync(() => mirror.watch(a, () => {}))
+
+        mirror.commit(withHosts("a.example"))
+        yield* Effect.andThen(mirror.flush, Effect.andThen(idle(counted), mirror.flush))
+        expect(Option.getOrNull(mirror.statusOf(a))?._tag).toBe("Running")
+
+        // Converged and watched. The mirror that polled read this lifetime
+        // every 250 ms forever; this one has been told there is nothing to
+        // read, and so reads nothing.
+        const afterConverging = reads
+        yield* Effect.sleep(400)
+        expect(reads).toBe(afterConverging)
+
+        // And it is not merely asleep: a real change still wakes it, with no
+        // flush of the test's own. Withdrawal is two transitions — Stopping,
+        // then gone — and the mirror is told about both.
+        const gone = yield* Deferred.make<void>()
+        yield* Effect.sync(() =>
+          mirror.watch(a, () => {
+            if (Option.isNone(mirror.statusOf(a))) Deferred.doneUnsafe(gone, Effect.void)
+          })
+        )
+        mirror.commit(emptyState)
+        yield* Deferred.await(gone)
+        expect(reads).toBeGreaterThan(afterConverging)
       })
     ))
 
@@ -143,7 +202,7 @@ describe("ui mirror", () => {
         expect(Option.getOrNull(mirror.statusOf(a))?._tag).toBe("Running")
 
         yield* Effect.sync(unwatch)
-        // Forgotten, not stale: an unwatched lifetime is no longer polled, so
+        // Forgotten, not stale: an unwatched lifetime is no longer read, so
         // the mirror reports what it reports for anything it is not tracking.
         expect(mirror.statusOf(a)._tag).toBe("None")
       })

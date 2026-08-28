@@ -15,12 +15,43 @@ control state into desired keys for those families. Each committed state
 atomically replaces desired state, and the Controller asynchronously converges
 live Effect Scopes and capability bindings toward that desire.
 
-This repository is the **v0 kernel**: the smallest real implementation able to
-falsify the specification in [`docs/spec.md`](docs/spec.md), plus the
-conformance suite (spec §14). It is not published to npm — publication is gated
-on migrating a keyed feature of a production application (spec §16). The
-snapshot API, diagnostics, supervision policies, incremental selectors and
-nested Reconcilers are deliberately deferred (spec §16.1).
+```sh
+npm install effect-reconciler effect
+```
+
+`effect` v4 is a **peer** dependency, deliberately: a second copy in the tree
+would give you a second runtime identity, and services published by a lifetime
+would not be the services your code asks for.
+
+> **Experimental `0.x`.** The kernel and its semantics are specified in
+> [`docs/spec.md`](docs/spec.md) and held to the conformance suite (spec §14),
+> and `Definition`, `Binding`, `commit`, `status` and `shutdown` are the parts
+> meant to be built on. **`retry`, `failures`, `changes` and everything about
+> observability and diagnostics are unstable** and may change shape within
+> `0.x`. Deliberately absent, and not planned for `0.x`: the snapshot API,
+> DevTools, supervision and retry policy DSLs, incremental selectors and
+> nested Reconcilers (spec §16.1).
+
+## The 30-second model
+
+Three things, and nothing else to learn:
+
+| | what it is | when it runs |
+| :--- | :--- | :--- |
+| **Definition** | the static architecture — which families exist, who owns whom, what requires what | once, at startup |
+| **Binding** | pure selectors from *your* state to the keys each family should have | on every commit |
+| **Controller** | commit state, read status, retry a failure, shut down | for the life of the app |
+
+```text
+commit(state) ─▶ selectors ─▶ desired keys ─▶ reconcile ─▶ live Effect Scopes
+                  (pure)       (a snapshot)    (async)      (started, stopped)
+```
+
+A lifetime exists **while its key is desired and it is admissible** — its
+owner is Running, its providers are Running, and the replacement policy allows
+it. Nothing else starts or stops it. There is no `start`, `stop`, `restart` or
+`invalidate` to call, and that absence is the design: a lifecycle you cannot
+drive by hand is a lifecycle that cannot drift from your state.
 
 ## Usage
 
@@ -43,15 +74,26 @@ const Editor = Reconciler.define((define) => {
         // acquireRelease / addFinalizer are tied to this lifetime's Scope
       })
   })
-  return { Session, Workspace }
+  const Document = define.many("Document", {
+    owner: Workspace, // `many`: one lifetime per key, reconciled independently
+    start: (uri: string) => Effect.log(`open ${uri}`)
+  })
+  return { Session, Workspace, Document }
 })
 
 // 2. Bind any control-state type with pure selectors. Owned selectors receive
 //    the semantic owner reference: its key, and its own owner up to the root.
 const Bound = Editor.bind<Model>((bind) => ({
+  // A root `one` family: `Option<key>` — desired, or not.
   session: bind.one(Editor.Session, (model) => model.user),
+  // An owned `one`: the selector runs per live owner and receives it.
   workspace: bind.one(Editor.Workspace, (model, owner) =>
     Option.fromNullable(model.workspacesByUser[owner.key]) // owner.key is the Session key
+  ),
+  // A `many`: the keys that should exist under this owner. Add one and one
+  // starts; drop one and one stops; leave one alone and nothing happens to it.
+  documents: bind.many(Editor.Document, (model, owner) =>
+    model.openByWorkspace[owner.key] ?? []
   )
 }))
 
@@ -103,6 +145,11 @@ const state = yield* controller.status(ref) // Option<Starting|Running|Failed|St
 // The environment gets fixed: retry the same semantic key. No retry nonce in
 // the model, no withdrawing and restoring desire.
 yield* controller.retry(ref)
+
+// A payload-free prompt: something a `status` read could report has moved.
+// Nothing is named, so there is nothing to trust — you re-read what you care
+// about. A converged runtime is silent, which is what a timer cannot be.
+yield* Stream.runForEach(controller.changes, () => refreshWhateverIsOnScreen)
 ```
 
 Expected failures are tagged data, so recovery is ordinary Effect:
@@ -141,8 +188,9 @@ More complete examples:
   upstream Foldkit example app migrated onto it, including where that did not
   pay off.
 - [`examples/ui`](examples/ui/README.md) — React, Solid and Lit adapters over
-  a shared synchronous mirror of `Controller.status`, and what v0 is missing
-  for them (a change notification: the mirror polls).
+  a shared synchronous mirror of `Controller.status`, driven entirely by
+  `changes`. This example is why `changes` exists: it was built against a
+  polling mirror first, and that is what showed the signal was worth adding.
 - [`examples/cli`](examples/cli/README.md) — a REPL as the control plane, with
   real listeners and file watches, so `EADDRINUSE` / `ENOENT` exercise failure,
   `status` and `retry` end to end.
@@ -174,10 +222,105 @@ Spec §14 maps each of these to the test file that proves it.
   keys under different ancestors stay distinct
 - a commit that returns has published; a commit interrupted before its
   publication point has published nothing
+- change signals report every transition `status` can report — `Starting →
+  Running` included — stay silent through an equivalent commit, coalesce, and
+  prompt a late or racing subscriber exactly once
+
+## Where it sits next to `RcMap` and `LayerMap`
+
+```text
+RcMap / LayerMap:    a resource exists while it is referenced
+effect-reconciler:   a resource exists while it is desired and admissible
+```
+
+Both give you keyed resource lifetimes; only the trigger differs, and the
+trigger is the whole question. Reach for `RcMap` or `LayerMap` when the thing
+that should keep a resource alive is *someone using it* — that is reference
+counting, it is smaller, and this package does not improve on it. Reach for a
+Reconciler when the thing that should keep a resource alive is *what your
+state says*, and when the coordination around it — ownership, provider
+invalidation, replacement, readiness — is what you would otherwise write and
+test by hand.
+
+The honest boundary is in [`examples/foldkit-migration`](examples/foldkit-migration/README.md):
+migrating a **single flat resource** — no ownership, no dependencies, no keyed
+children — made the code 35% *larger*. If that is your shape, a small helper
+over `RcMap` is the better answer.
+
+## Foldkit and other control planes
+
+A Reconciler takes a control plane; it is not one. Foldkit is a natural fit —
+`Message → update → committed Model`, and the Model goes to the View, to
+Commands, and to `controller.commit`. The adapter's whole obligation is one
+sentence: only committed Models reach the Reconciler, in the same serialized
+order as Foldkit's Model transitions, and the Message loop never awaits
+convergence.
+
+Two boundaries are worth internalizing before writing the adapter:
+
+- **Event versus state causality.** "Because X happened, run this finite
+  Effect" is a Command. "While the committed state desires identity X, keep
+  this lifetime alive" is the Reconciler. Putting the second in a Command is
+  how lifecycle state gets back into the Model.
+- **Runtime status is not application state.** If the UI needs
+  `WorkspaceReady`, have the lifetime dispatch a semantic Message and let
+  `update` decide, rather than the View branching on `Starting` / `Running`.
+
+The same holds for a UI framework, a REPL or an HTTP service — see
+[`examples/ui`](examples/ui/README.md) and [`examples/cli`](examples/cli/README.md).
+
+## What it guarantees, and what it does not
+
+Three structural invariants carry the value (spec §11):
+
+- **Admission** — a lifetime starts only while its key is desired, its owner
+  is Running, its required providers are Running and captured, and the
+  replacement policy permits it.
+- **Ownership closure** — an obsolete owner makes every descendant obsolete,
+  with no child restating the ancestor's condition. This is the
+  `if (session && workspace && document)` that leaves your code.
+- **Dependency invalidation** — an invalid provider obsoletes exactly its
+  bound dependents, and nothing else. Provider generations never mix: a
+  dependent captures physical provider instances at admission and is never
+  silently rebound.
+
+On concurrency specifically: commits linearize and publish atomically — a
+commit that returns has published, and one interrupted before its publication
+point has published nothing — and `commit` never awaits startup, shutdown,
+finalizers, replacement, provider readiness, retry or convergence. `shutdown`
+is idempotent, interrupts startups in flight and awaits structured
+finalization. Under `sequential` replacement (the default) a replacement
+starts only after the outgoing generation's finalizers have actually run.
+
+It deliberately does **not** guarantee sibling startup or shutdown ordering,
+reconciliation traversal order, wall-clock convergence deadlines, fair
+scheduling among unrelated lifetimes, materialization of every intermediate
+desired state, one physical generation per commit, one event per internal
+transition, or stable generation numbers. Depending on any of those is
+depending on an implementation detail.
+
+## Non-goals
+
+This does not replace `Effect`, `Scope`, `Layer`, `Context`, `Fiber`, `Stream`,
+`RcMap` or `LayerMap` — it coordinates them. Effect answers how work executes,
+is interrupted and finalized; the Reconciler answers which lifetime should
+exist, who owns it, which provider instances it must use, when it became
+obsolete and which desired replacement starts next.
+
+Out of scope entirely, not merely unimplemented: query caching, stale-time
+policies, actor mailboxes, durable workflows, distributed orchestration,
+remote reconciliation, automatic dependency discovery, arbitrary capability
+cycles, renderer, router, forms, HMR and general signal reactivity.
+
+Everything it does remains expressible by hand with ordinary Effect. It earns
+its place only by removing application-written lifecycle predicates, owner
+tracking, readiness coordination, provider invalidation and race-condition
+tests — and if it is not removing those for you, it is not paying for itself.
 
 ## Requirements
 
-`effect` v4 (currently `4.0.0-rc.x`) as a peer dependency.
+`effect` v4 (currently `4.0.0-rc.x`) as a peer dependency, and Node 20 or
+later.
 
 ## Development
 
@@ -191,7 +334,20 @@ npm run check   # tsc --strict + Effect diagnostics; includes type-misuse assert
 npm run lint    # Effect language-service diagnostics on their own
 npm test        # @effect/vitest conformance suite
 npm run bench   # scale benchmark, 100 / 1k / 10k lifetimes (see bench/RESULTS.md)
+npm run build   # dist/: ESM + declarations + maps, from tsconfig.build.json
+npm run verify-package   # pack, install into a throwaway project, drive it
 ```
 
-CI runs `npm ci && npm run check && npm run lint && npm test` on Node LTS and
-current for every push and pull request.
+`prepack` runs check, lint, test and build, so nothing publishes that has not
+passed all four. The published tarball carries `dist/` and `src/` — the maps
+point at the sources, so a stack trace and a go-to-definition both land in
+real code. `src/internal/` is emitted because the public declarations refer to
+it, but it is unreachable through `exports`: only the modules named there are
+the `0.x` surface.
+
+CI runs check, lint, the conformance suite, the build and `verify-package` on
+Node LTS and current for every push and pull request. `verify-package` is the
+one step nothing above it can stand in for: it packs the tarball, installs it
+into a throwaway project with `effect` supplied from outside, and drives the
+package through its public entry points — so an `exports` entry pointing at a
+file `files` does not ship fails here rather than on someone's install.

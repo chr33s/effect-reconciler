@@ -2,16 +2,93 @@
   "name": "effect-reconciler",
   "version": "0.1.0",
   "description": "State-reconciled keyed Effect lifetimes",
+  "keywords": [
+    "effect",
+    "effect-ts",
+    "reconciler",
+    "reconciliation",
+    "lifecycle",
+    "resource",
+    "scope",
+    "keyed",
+    "declarative",
+    "typescript"
+  ],
+  "homepage": "https://github.com/chr33s/effect-reconciler#readme",
+  "bugs": {
+    "url": "https://github.com/chr33s/effect-reconciler/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chr33s/effect-reconciler.git"
+  },
+  "license": "MIT",
   "type": "module",
-  "private": true,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./Binding": {
+      "types": "./dist/Binding.d.ts",
+      "default": "./dist/Binding.js"
+    },
+    "./Definition": {
+      "types": "./dist/Definition.d.ts",
+      "default": "./dist/Definition.js"
+    },
+    "./Errors": {
+      "types": "./dist/Errors.d.ts",
+      "default": "./dist/Errors.js"
+    },
+    "./Failure": {
+      "types": "./dist/Failure.d.ts",
+      "default": "./dist/Failure.js"
+    },
+    "./LifetimeRef": {
+      "types": "./dist/LifetimeRef.d.ts",
+      "default": "./dist/LifetimeRef.js"
+    },
+    "./Reconciler": {
+      "types": "./dist/Reconciler.d.ts",
+      "default": "./dist/Reconciler.js"
+    },
+    "./Replacement": {
+      "types": "./dist/Replacement.d.ts",
+      "default": "./dist/Replacement.js"
+    },
+    "./Status": {
+      "types": "./dist/Status.d.ts",
+      "default": "./dist/Status.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "src",
+    "docs/spec.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "verify-package": "node scripts/verify-package.mjs",
     "check": "tsc --noEmit",
     "lint": "effect-tsgo diagnostics --project tsconfig.json --format pretty",
+    "test": "vitest run",
     "bench": "vitest run --config bench/vitest.config.ts",
     "example:metrics": "node examples/foldkit/metrics.mjs",
     "example:migration-metrics": "node examples/foldkit-migration/metrics.mjs",
-    "test": "vitest run",
-    "prepare": "effect-tsgo patch --typescript --no-oxlint"
+    "prepare": "effect-tsgo patch --typescript --no-oxlint",
+    "prepack": "npm run check && npm run lint && npm run test && npm run build"
   },
   "peerDependencies": {
     "effect": "^4.0.0-rc.112"

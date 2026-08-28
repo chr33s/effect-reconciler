@@ -55,24 +55,39 @@ Two smaller decisions worth knowing:
   of the latest state, which is why the runtime coalesces reconcile passes for
   the same reason.
 
-## The one thing v0 is missing
+## What this example changed in the kernel
 
-There is no change notification. `Controller.failures` reports failures only,
-and nothing at all reports `Starting → Running`, so **the mirror polls** — 25 ms
-while something is converging, 250 ms once nothing watched is in transition,
-with an immediate refresh after every commit, retry and failure.
-
-That is a real gap, not a styling choice, and it has a small fix:
-`Controller.changes: Stream<void>` — no payload, published at the end of any
-pass that changed bookkeeping. It would replace the poll loop entirely. It
-carries no topology, so it does not cross the "topology is internal vocabulary"
-line: a subscriber still re-reads through `status(ref)`. It does make
-convergence *timing* observable, which the specification deliberately does not
-promise, but a payload-free "re-read now" edge promises nothing about when.
-
-Polling is good enough to build a UI against, which is why this example exists
-before the kernel change does: it is what tells you whether `changes` is worth
+This adapter was written first, against a runtime with no change notification
+at all. `Controller.failures` reported failures only, nothing reported
+`Starting → Running`, and so the mirror **polled** — 25 ms while something was
+converging, 250 ms once nothing watched was in transition. That was good
+enough to build a UI against, which is why the example existed before the
+kernel change did: it is what showed that `Controller.changes` was worth
 adding.
+
+It is now in the kernel (§9.5) and the poll loop is gone. The mirror re-reads
+when a pass says it moved something, and at no other time — `mirror.test.ts`
+asserts exactly that by counting `status` reads across a 400 ms idle window
+and finding none.
+
+Three things the signal was designed around, all visible in the mirror:
+
+- **It carries no payload**, so it crosses no line the specification draws
+  around internal vocabulary: a subscriber still re-reads through `status`,
+  which stays the sole authority. There is nothing to trust, and so nothing to
+  get wrong by trusting it.
+- **A subscription is prompted once.** An observer has to subscribe and take
+  its first reading in some order, and a transition landing between the two
+  would be lost either way round. The runtime replays the last prompt to a
+  late subscriber, so `Stream.runForEach(controller.changes, …)` is all the
+  mirror needs — no ordering care, no initial-read window.
+- **It replaced the failure subscription too.** A failed startup is a
+  transition like any other, so the mirror no longer watches `failures` at
+  all; watching both would mean flushing twice for one event.
+
+What it deliberately does not do is promise *when* convergence happens. A
+payload-free "re-read now" edge says something moved, never how long anything
+took.
 
 ## React
 
@@ -128,8 +143,8 @@ const tag = createLifetimeTag(mirror, () => connectionRef(definition, host()))
 The reference argument is an accessor, so a component can follow a *changing*
 lifetime without rebuilding the primitive — `solid.test.ts` switches hosts and
 watches the old lifetime close and the new one open. Watching is tied to the
-owning computation, so disposing a root stops the mirror polling what nothing
-renders.
+owning computation, so disposing a root stops the mirror re-reading what
+nothing renders.
 
 ### Written against Solid 2.0
 

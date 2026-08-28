@@ -29,6 +29,7 @@ import {
 } from "./desiredSnapshot.js"
 import { Ident, slotIdent } from "./identity.js"
 import {
+  concludeStartup,
   currentInstance,
   isObsolete,
   makeLiveState,
@@ -210,6 +211,7 @@ export interface TestHooks {
 
 export interface ControllerInternal<State> {
   readonly commit: (state: State) => Effect.Effect<void, CommitError>
+  readonly changes: Stream.Stream<void>
   readonly failures: Stream.Stream<LifetimeFailure>
   readonly status: (ref: LifetimeRef) => Effect.Effect<Option.Option<LifetimeStatus>>
   readonly retry: (ref: LifetimeRef) => Effect.Effect<void, ControllerClosed>
@@ -247,6 +249,18 @@ export const makeController = <State>(
       // Sliding: publishing a failure never blocks the controller, and with no
       // subscriber attached nothing is retained.
       const failureLog = yield* PubSub.sliding<LifetimeFailure>(64)
+      // A change signal is a prompt to re-read, never a datum, so a subscriber
+      // holding one undrained has nothing to gain from a second: capacity 1
+      // coalesces every burst into "there is something new to read".
+      //
+      // `replay: 1` is what makes the stream safe to build a cache on. An
+      // observer must establish its subscription and take its first reading
+      // in some order, and a transition landing between the two would be
+      // invisible either way round; replaying the last prompt to a late
+      // subscriber means the observer is always told to read again after any
+      // transition it could have missed. Replaying a *prompt* costs nothing
+      // and reveals nothing — there is no history here to leak.
+      const changeLog = yield* PubSub.sliding<void>({ capacity: 1, replay: 1 })
 
       const live = makeLiveState()
       let open = true
@@ -260,6 +274,9 @@ export const makeController = <State>(
       // Generations `Controller.retry` retired between passes: the next pass
       // owes their subtrees a cascade that no snapshot comparison would find.
       const retiredOutOfBand: Array<LiveInstance> = []
+      // The value of `live.version` the last change signal spoke for. A pass
+      // that leaves them equal moved nothing an observer could see.
+      let publishedVersion = 0
 
       // Requesting a pass and losing convergence are the same event, so they
       // are the same synchronous step: no fiber can observe one without the
@@ -287,7 +304,7 @@ export const makeController = <State>(
             // `starting` state.
             if (!open || inst.status !== "starting") return Effect.void
             if (Exit.isSuccess(exit)) {
-              inst.status = "running"
+              concludeStartup(live, inst, "running")
               inst.providedContext = Context.isContext(exit.value)
                 ? (exit.value as Context.Context<never>)
                 : Context.empty()
@@ -306,7 +323,7 @@ export const makeController = <State>(
             // marks the instance obsolete (or closes the controller) first, so
             // an interrupted exit reaching this point means the start Effect
             // interrupted itself — treated as failure, not left wedged.
-            inst.status = "failed"
+            concludeStartup(live, inst, "failed")
             inst.failure = exit.cause
             // Only a failure whose semantic desire is still current is an
             // application-visible failure. Desire can have been withdrawn
@@ -330,7 +347,13 @@ export const makeController = <State>(
                   Effect.forkIn(rootScope, { uninterruptible: true }),
                   Effect.asVoid
                 )
-              )
+              ),
+              // The generation is Failed *now*. Waking only when its partial
+              // resources finish finalizing would make `changes` — and so any
+              // observer built on it — wait on a finalizer that has nothing to
+              // do with the transition it is reporting, and never arrive at
+              // all behind one that blocks.
+              Effect.andThen(wakeUp)
             )
           })
         )
@@ -437,12 +460,29 @@ export const makeController = <State>(
       // used, so a production controller never pays for the walk.
       let convergenceObserved = false
 
+      /**
+       * Tell subscribers that re-reading could now say something different.
+       * The signal carries no payload by construction: it names no lifetime,
+       * no generation and no transition, so it exposes nothing `status` would
+       * not already answer for (§9.4), and a subscriber that misses one still
+       * reads the same authoritative state as one that does not.
+       */
+      const publishChanges = (): void => {
+        if (live.version === publishedVersion) return
+        publishedVersion = live.version
+        PubSub.publishUnsafe(changeLog, void 0)
+      }
+
       const onePass = Effect.suspend(() => {
         const covered = wakeVersion
         return Effect.andThen(
           reconcilePass,
           Effect.sync(() => {
             reconciledVersion = covered
+            // Under the mutex, after the pass and after every transition it
+            // caused, so a subscriber woken by this signal reads state at
+            // least as new as the one that caused it.
+            publishChanges()
             if (convergenceObserved && quiescent()) Latch.openUnsafe(converged)
           })
         )
@@ -572,9 +612,13 @@ export const makeController = <State>(
               })
             ),
             Effect.andThen(Scope.close(rootScope, Exit.void)),
-            // Nothing is left to converge on, and no further pass will run.
+            // Nothing is left to converge on, and no further pass will run —
+            // so this is also the last chance to signal whatever the close
+            // itself moved. A subscriber that re-reads after it sees the final
+            // state of a closed controller.
             Effect.andThen(
               Effect.sync(() => {
+                publishChanges()
                 Latch.openUnsafe(converged)
               })
             ),
@@ -607,6 +651,7 @@ export const makeController = <State>(
 
       return {
         commit,
+        changes: Stream.fromPubSub(changeLog),
         failures: Stream.fromPubSub(failureLog),
         status,
         retry,
