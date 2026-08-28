@@ -3,7 +3,8 @@ import type { AnyHandle, DefinitionSource, ManyHandle, OneHandle } from "./Defin
 
 /**
  * One bound selector: a pure mapping from control state (and, for owned
- * families, the desired owner key) to the desired key(s) of one family.
+ * families, the semantic reference of the desired owner) to the desired
+ * key(s) of one family.
  *
  * Selectors describe desire. They must not perform Effects, read mutable
  * runtime state, or inspect live physical generations.
@@ -11,19 +12,19 @@ import type { AnyHandle, DefinitionSource, ManyHandle, OneHandle } from "./Defin
 export interface BindingEntry<in State> {
   readonly handle: AnyHandle
   readonly cardinality: "one" | "many"
-  readonly selector: (state: State, ownerKey: unknown) => unknown
+  readonly selector: (state: State, owner: unknown) => unknown
 }
 
 export interface BindApi<in out State> {
   /** Bind a `one` family: `None` means absent, `Some(k)` means desired. */
-  readonly one: <K, OK>(
-    handle: OneHandle<K, OK, any, any, any>,
-    selector: (state: State, ownerKey: OK) => Option.Option<K>
+  readonly one: <K, Own>(
+    handle: OneHandle<K, Own, any, any, any>,
+    selector: (state: State, owner: Own) => Option.Option<K>
   ) => BindingEntry<State>
   /** Bind a `many` family: each returned key is desired independently. */
-  readonly many: <K, OK>(
-    handle: ManyHandle<K, OK, any, any, any>,
-    selector: (state: State, ownerKey: OK) => Iterable<K>
+  readonly many: <K, Own>(
+    handle: ManyHandle<K, Own, any, any, any>,
+    selector: (state: State, owner: Own) => Iterable<K>
   ) => BindingEntry<State>
 }
 

@@ -2,6 +2,7 @@ import * as Result from "effect/Result"
 import * as Option from "effect/Option"
 import type { BindingEntry } from "../Binding.js"
 import { InvalidDesiredState } from "../Errors.js"
+import type { Owner } from "../Owner.js"
 import type { Compiled } from "./compiledDefinition.js"
 
 /** One desired instance: family + semantic key, owner-relative. */
@@ -15,6 +16,13 @@ export interface DesiredNode {
   /** Desired instance chain from root to this node (inclusive). */
   readonly chain: ReadonlyArray<DesiredNode>
   readonly childrenByFamily: ReadonlyMap<number, ReadonlyArray<DesiredNode>>
+  /**
+   * The pure semantic reference handed to the selectors of this node's owned
+   * families: this node's family name and key, linked to its own owner. The
+   * chain is what lets an owned selector distinguish two identical direct
+   * owner keys under different ancestors.
+   */
+  readonly ownerRef: Owner<unknown, unknown>
 }
 
 /** One coherent desired snapshot produced by evaluating a Binding against a
@@ -57,10 +65,10 @@ export const evaluate = <State>(
     const familyNodes: Array<DesiredNode> = []
 
     for (const parent of parents) {
-      const ownerKey = parent === null ? undefined : parent.key
+      const owner = parent === null ? null : parent.ownerRef
       let keys: Array<unknown>
       try {
-        const result = entry.selector(state, ownerKey)
+        const result = entry.selector(state, owner)
         if (family.cardinality === "one") {
           if (!Option.isOption(result)) {
             return invalid(`selector for "${family.name}" must return an Option`)
@@ -102,7 +110,12 @@ export const evaluate = <State>(
           path,
           parent,
           chain: [],
-          childrenByFamily
+          childrenByFamily,
+          ownerRef: {
+            family: family.name,
+            key,
+            parent: parent === null ? null : parent.ownerRef
+          }
         }
         ;(node as { chain: ReadonlyArray<DesiredNode> }).chain =
           parent === null ? [node] : [...parent.chain, node]

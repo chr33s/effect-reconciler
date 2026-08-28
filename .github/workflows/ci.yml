@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kernel:
+    name: kernel (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [lts/*, current]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # `prepare` patches the local TypeScript with the Effect language
+      # service, so `npm run check` reports Effect diagnostics too.
+      - run: npm ci
+
+      - name: Type check and type-misuse assertions
+        run: npm run check
+
+      - name: Effect language service diagnostics
+        run: npm run lint
+
+      - name: Conformance suite
+        run: npm test

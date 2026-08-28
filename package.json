@@ -7,6 +7,8 @@
   "scripts": {
     "check": "tsc --noEmit",
     "lint": "effect-tsgo diagnostics --project tsconfig.json --format pretty",
+    "bench": "vitest run --config bench/vitest.config.ts",
+    "example:metrics": "node examples/foldkit/metrics.mjs",
     "test": "vitest run",
     "prepare": "effect-tsgo patch --typescript --no-oxlint"
   },
@@ -18,6 +20,7 @@
     "@effect/vitest": "^4.0.0-rc.112",
     "@types/node": "^26.4.0",
     "effect": "^4.0.0-rc.112",
+    "foldkit": "0.154.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"
   }

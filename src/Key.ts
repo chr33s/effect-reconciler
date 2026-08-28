@@ -33,12 +33,13 @@ export const struct = <Fields extends Record<string, Key<any>>>(
   fields: Fields
 ): Key<{ readonly [F in keyof Fields]: Fields[F] extends Key<infer A> ? A : never }> => {
   const names = Object.keys(fields).sort()
-  return make(
-    (value) =>
-      "{" +
-      names
-        .map((n) => JSON.stringify(n) + ":" + fields[n]!.encode((value as any)[n]))
-        .join(",") +
-      "}"
+  // Every component encoding is framed rather than spliced into a
+  // delimiter-separated string: component encodings are arbitrary strings, so
+  // raw concatenation can collide even when each component encoder is
+  // injective. `JSON.stringify` over [name, encoding] pairs in canonical
+  // field order escapes the components, which keeps the composition
+  // injective.
+  return make((value) =>
+    JSON.stringify(names.map((n) => [n, fields[n]!.encode((value as any)[n])]))
   )
 }

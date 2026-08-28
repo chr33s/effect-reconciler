@@ -4,7 +4,7 @@ import * as Key from "../src/Key.js"
 import * as Reconciler from "../src/Reconciler.js"
 import * as Replacement from "../src/Replacement.js"
 import { bindEditor, makeEditor, model, SettingsService } from "./fixtures.js"
-import { count, eventually, settle } from "./util.js"
+import { count, eventually, idle } from "./util.js"
 
 describe("capability dependencies", () => {
   it.live("9.4 — provider-only replacement invalidates dependents only", () =>
@@ -40,7 +40,7 @@ describe("capability dependencies", () => {
         () => log.includes("start:diagnostics:foo:s2:ts"),
         "diagnostics rebound to new settings"
       )
-      yield* settle
+      yield* idle(controller)
 
       // Diagnostics was replaced...
       expect(log).toContain("stop:diagnostics:foo:s1:ts")
@@ -114,7 +114,7 @@ describe("capability dependencies", () => {
 
       // D#1's startup completes late — its result must be discarded.
       yield* Deferred.succeed(lateGate, void 0)
-      yield* settle
+      yield* idle(controller)
 
       expect(log.filter((e) => e.startsWith("probe:"))).toEqual(["probe:s2"])
     }))

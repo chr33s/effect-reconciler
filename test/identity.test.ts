@@ -2,7 +2,7 @@ import { Effect, Option } from "effect"
 import { describe, expect, it } from "@effect/vitest"
 import * as Key from "../src/Key.js"
 import * as Reconciler from "../src/Reconciler.js"
-import { count, eventually, settle } from "./util.js"
+import { count, eventually, idle } from "./util.js"
 
 interface UserState {
   readonly user: Option.Option<string>
@@ -37,7 +37,7 @@ describe("identity", () => {
       // A different state object with semantically equivalent desire.
       yield* controller.commit({ user: Option.some("alice") })
       yield* controller.commit({ user: Option.some("alice") })
-      yield* settle
+      yield* idle(controller)
 
       expect(log).toEqual(["start:alice"])
     }))
@@ -74,7 +74,7 @@ describe("identity", () => {
       yield* eventually(() => log.includes("start:alice"), "started")
       yield* controller.commit({ user: Option.none() })
       yield* eventually(() => log.includes("stop:alice"), "stopped")
-      yield* settle
+      yield* idle(controller)
       expect(log).toEqual(["start:alice", "stop:alice"])
     }))
 
@@ -108,7 +108,7 @@ describe("identity", () => {
         () => log.includes("stop:foo") && log.includes("start:baz"),
         "foo stopped, baz started"
       )
-      yield* settle
+      yield* idle(controller)
 
       expect(count(log, "start:bar")).toBe(1)
       expect(count(log, "stop:bar")).toBe(0)
@@ -160,7 +160,7 @@ describe("identity", () => {
       yield* eventually(() => log.includes("start:a@1"), "started")
       // New object, equal structure: retained.
       yield* controller.commit({ uri: "a", version: 1 })
-      yield* settle
+      yield* idle(controller)
       expect(log).toEqual(["start:a@1"])
       // Changed field: replaced.
       yield* controller.commit({ uri: "a", version: 2 })
@@ -189,8 +189,8 @@ describe("identity", () => {
           // Parent "a" with child "b" would collide with parent "a/1:b" if
           // encodings were spliced into paths unescaped.
           parents: bind.many(Def.Parent, () => ["a", "a/1:b"]),
-          child: bind.one(Def.Child, (_s, parentKey: string) =>
-            parentKey === "a" ? Option.some("b") : Option.none()
+          child: bind.one(Def.Child, (_s, owner) =>
+            owner.key === "a" ? Option.some("b") : Option.none()
           )
         }))
       )
@@ -204,6 +204,49 @@ describe("identity", () => {
         "all three distinct lifetimes exist"
       )
       expect(log).toHaveLength(3)
+    }))
+
+  it.live("Key.struct framing survives adversarial component encodings", () =>
+    Effect.gen(function* () {
+      const log: Array<string> = []
+      // Raw identity encoding: injective on its own, but free to contain any
+      // delimiter the composition might use.
+      const rawKey: Key.Key<string> = { encode: (s) => s }
+      const key = Key.struct({ a: rawKey, b: rawKey })
+
+      const Def = Reconciler.define((define) => ({
+        Res: define.many("Res", {
+          key,
+          start: (k: { readonly a: string; readonly b: string }) =>
+            Effect.sync(() => log.push(`start:${k.a}|${k.b}`))
+        })
+      }))
+      const controller = yield* Reconciler.make(
+        Def.bind<{ readonly keys: ReadonlyArray<{ readonly a: string; readonly b: string }> }>(
+          (bind) => ({ res: bind.many(Def.Res, (s) => s.keys) })
+        )
+      )
+
+      // Distinct structures that collide under naive `"a":<a>,"b":<b>`
+      // concatenation, plus quotes, braces, slashes, pipes and field-name-like
+      // text in the component encodings.
+      const adversarial = [
+        { a: `1,"b":2`, b: `3` },
+        { a: `1`, b: `2,"b":3` },
+        { a: `{"a":x}`, b: `y` },
+        { a: `{"a":x}|y`, b: `` },
+        { a: `/1:2`, b: `|3` },
+        { a: `/1`, b: `:2|3` }
+      ]
+      const encodings = new Set(adversarial.map((k) => key.encode(k)))
+      expect(encodings.size).toBe(adversarial.length)
+
+      yield* controller.commit({ keys: adversarial })
+      yield* eventually(
+        () => log.length === adversarial.length,
+        "every distinct structure got its own lifetime"
+      )
+      expect(new Set(log).size).toBe(adversarial.length)
     }))
 
   it.live("Key.number distinguishes 0 from -0 (encode defines semantic equality)", () =>

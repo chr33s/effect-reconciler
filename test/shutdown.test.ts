@@ -2,7 +2,7 @@ import { Deferred, Effect, Option } from "effect"
 import { describe, expect, it } from "@effect/vitest"
 import * as Key from "../src/Key.js"
 import * as Reconciler from "../src/Reconciler.js"
-import { eventually, settle } from "./util.js"
+import { eventually, quietFor } from "./util.js"
 
 describe("shutdown", () => {
   it.live("9.13 — shutdown interrupts startup, awaits finalization, suppresses late readiness", () =>
@@ -42,9 +42,12 @@ describe("shutdown", () => {
       expect(log).toContain("cleanup:a")
       expect(log).not.toContain("completed:a")
 
-      // Late completion cannot resurrect anything after shutdown.
+      // Late completion cannot resurrect anything after shutdown. The
+      // reconcile loop is gone with the root Scope, so there is no
+      // convergence barrier left to wait on: a real-time window is the only
+      // way to give a wrong implementation a chance to misbehave.
       yield* Deferred.succeed(gate, void 0)
-      yield* settle
+      yield* quietFor()
       expect(log).not.toContain("child:start")
     }))
 

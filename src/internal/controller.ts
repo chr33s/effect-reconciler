@@ -4,12 +4,15 @@ import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
 import * as Fiber from "effect/Fiber"
 import { pipe } from "effect/Function"
+import * as PubSub from "effect/PubSub"
 import * as Queue from "effect/Queue"
 import * as Result from "effect/Result"
 import * as Scope from "effect/Scope"
 import * as Semaphore from "effect/Semaphore"
 import type { BindingEntry } from "../Binding.js"
 import { ControllerClosed, type CommitError } from "../Errors.js"
+import type { LifetimeFailure } from "../Failure.js"
+import type { Owner } from "../Owner.js"
 import type { Compiled, CompiledFamily, CompiledRequirement } from "./compiledDefinition.js"
 import {
   emptySnapshot,
@@ -52,9 +55,31 @@ interface Slot {
   readonly retiring: Set<LiveInstance>
 }
 
+export const TestHooksId: unique symbol = Symbol.for("effect-reconciler/TestHooks")
+
+/**
+ * Test-only observation of controller bookkeeping. These hooks read the same
+ * state machine the reconciler already maintains and take the same mutex it
+ * already takes; they add no production behaviour and are not part of the
+ * public `Controller`.
+ */
+export interface TestHooks {
+  /** Hold the controller's serialization mutex for the duration of `effect`. */
+  readonly holding: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
+  /**
+   * Completes once the controller has converged on the published desire:
+   * every wake has been reconciled and no instance is still starting or
+   * finalizing. Never completes while a lifetime is deliberately wedged (a
+   * blocked startup or finalizer), so gate-driven tests await their gates.
+   */
+  readonly idle: Effect.Effect<void>
+}
+
 export interface ControllerInternal<State> {
   readonly commit: (state: State) => Effect.Effect<void, CommitError>
+  readonly failures: Effect.Effect<PubSub.Subscription<LifetimeFailure>, never, Scope.Scope>
   readonly shutdown: Effect.Effect<void>
+  readonly [TestHooksId]: TestHooks
 }
 
 /**
@@ -77,14 +102,25 @@ export const makeController = <State>(
     const rootScope = yield* Scope.make()
     const mutex = yield* Semaphore.make(1)
     const wake = yield* Queue.sliding<void>(1)
+    // Sliding: publishing a failure never blocks the controller, and with no
+    // subscriber attached nothing is retained.
+    const failureLog = yield* PubSub.sliding<LifetimeFailure>(64)
 
     let open = true
     let desired: DesiredSnapshot = emptySnapshot
+    // Bookkeeping for the convergence barrier: `wakeVersion` counts requested
+    // reconcile work, `reconciledVersion` the newest request a completed pass
+    // has covered. Equal versions mean no pass is owed.
+    let wakeVersion = 0
+    let reconciledVersion = 0
     const slots = new Map<string, Slot>()
     const currentByPath = new Map<string, LiveInstance>()
     const all = new Set<LiveInstance>()
 
-    const wakeUp = Effect.asVoid(Queue.offer(wake, void 0))
+    const wakeUp = Effect.suspend(() => {
+      wakeVersion++
+      return Effect.asVoid(Queue.offer(wake, void 0))
+    })
 
     const slotIdFor = (family: CompiledFamily, ownerPath: string, keyStr: string): string =>
       family.cardinality === "one"
@@ -194,12 +230,30 @@ export const makeController = <State>(
           // interrupted itself — treated as failure, not left wedged.
           inst.status = "failed"
           return pipe(
-            Effect.uninterruptible(closeInstance(inst, exit)),
-            Effect.forkIn(rootScope),
-            Effect.asVoid
+            PubSub.publish(failureLog, {
+              family: compiled.families[inst.familyId]!.name,
+              key: inst.key,
+              owner: semanticOwner(inst.owner),
+              cause: exit.cause
+            }),
+            Effect.andThen(
+              pipe(
+                Effect.uninterruptible(closeInstance(inst, exit)),
+                Effect.forkIn(rootScope),
+                Effect.asVoid
+              )
+            )
           )
         })
       )
+
+    /** The purely semantic reference chain of a live instance. */
+    const semanticOwner = (inst: LiveInstance | null): Owner<unknown, unknown> | null =>
+      inst === null ? null : {
+        family: compiled.families[inst.familyId]!.name,
+        key: inst.key,
+        parent: semanticOwner(inst.owner)
+      }
 
     const resolveProvider = (
       node: DesiredNode,
@@ -367,21 +421,39 @@ export const makeController = <State>(
     // Explicitly interruptible even though construction is uninterruptible:
     // shutdown must be able to stop the loop, while each individual pass
     // still runs to completion under its own mask.
+    const onePass = Effect.suspend(() => {
+      const covered = wakeVersion
+      return Effect.andThen(
+        reconcilePass,
+        Effect.sync(() => {
+          reconciledVersion = covered
+        })
+      )
+    })
+
     yield* pipe(
       Queue.take(wake),
-      Effect.andThen(mutex.withPermits(1)(Effect.uninterruptible(reconcilePass))),
+      Effect.andThen(mutex.withPermits(1)(Effect.uninterruptible(onePass))),
       Effect.forever,
       Effect.interruptible,
       Effect.forkIn(rootScope)
     )
 
+    /**
+     * The commit linearization point is entry into the publication region.
+     * Selector evaluation, validation and waiting for the mutex are all
+     * interruptible and publish nothing; once publication begins it runs to
+     * completion exactly once. The caller never faces a "maybe committed"
+     * outcome.
+     */
     const commit = (state: State): Effect.Effect<void, CommitError> =>
-      pipe(
-        Effect.suspend(() => {
-          // Selector evaluation is pure and happens against this one
-          // immutable state value, outside the critical section.
-          const snapshot = evaluate(compiled, entries, state)
-          return mutex.withPermits(1)(
+      Effect.suspend(() => {
+        // Pure, against this one immutable state value, outside the critical
+        // section and outside any mask.
+        const snapshot = evaluate(compiled, entries, state)
+        return mutex.withPermits(1)(
+          // [atomic publication region]
+          Effect.uninterruptible(
             Effect.suspend((): Effect.Effect<void, CommitError> => {
               if (!open) return Effect.fail(new ControllerClosed())
               if (Result.isFailure(snapshot)) return Effect.fail(snapshot.failure)
@@ -389,11 +461,8 @@ export const makeController = <State>(
               return wakeUp
             })
           )
-        }),
-        // Publication is atomic: an interrupted commit either never published
-        // or completed publication — never a partial snapshot.
-        Effect.uninterruptible
-      )
+        )
+      })
 
     const shutdownGate = yield* Deferred.make<void>()
     let shutdownStarted = false
@@ -417,6 +486,32 @@ export const makeController = <State>(
 
     yield* Effect.addFinalizer(() => shutdown)
 
-    return { commit, shutdown }
+    const quiescent = (): boolean => {
+      if (reconciledVersion !== wakeVersion) return false
+      for (const inst of all) {
+        if (inst.status === "starting" || inst.status === "stopping") return false
+        // A failed generation keeps its `closing` deferred forever; only a
+        // close that has not reached its finalization boundary is unsettled.
+        if (inst.closing !== null && !Deferred.isDoneUnsafe(inst.closing)) return false
+      }
+      for (const slot of slots.values()) {
+        if (slot.retiring.size > 0) return false
+      }
+      return true
+    }
+
+    const idle: Effect.Effect<void> = Effect.suspend(() =>
+      Effect.flatMap(
+        mutex.withPermits(1)(Effect.sync(quiescent)),
+        (settled) => (settled ? Effect.void : Effect.andThen(Effect.sleep(1), idle))
+      )
+    )
+
+    return {
+      commit,
+      failures: PubSub.subscribe(failureLog),
+      shutdown,
+      [TestHooksId]: { holding: mutex.withPermits(1), idle }
+    }
     })
   )

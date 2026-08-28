@@ -4,6 +4,7 @@
  */
 import { Context, Effect, Option } from "effect"
 import * as Key from "../src/Key.js"
+import type { Owner } from "../src/Owner.js"
 import * as Reconciler from "../src/Reconciler.js"
 
 const Def = Reconciler.define((define) => {
@@ -33,7 +34,7 @@ interface State {
 // Valid usage compiles.
 Def.bind<State>((bind) => ({
   session: bind.one(Def.Session, (s) => s.user),
-  workspace: bind.one(Def.Workspace, (_s, userId: string) => Option.some(userId)),
+  workspace: bind.one(Def.Workspace, (_s, owner) => Option.some(owner.key)),
   documents: bind.many(Def.Document, (s) => s.documents)
 }))
 
@@ -54,7 +55,23 @@ Def.bind<State>((bind) => ({
 
 Def.bind<State>((bind) => ({
   // @ts-expect-error — wrong owner key type: Workspace's owner key is a string
-  workspace: bind.one(Def.Workspace, (_s, ownerKey: number) => Option.some("acme"))
+  workspace: bind.one(Def.Workspace, (_s, owner: Owner<number, null>) => Option.some("acme"))
+}))
+
+// The owner reference is the whole semantic path, statically typed: a Document
+// sees its Workspace, that Workspace's Session, and the root beyond it.
+Def.bind<State>((bind) => ({
+  documents: bind.many(Def.Document, (s, owner) => {
+    const workspaceId: string = owner.key
+    const userId: string = owner.parent.key
+    const root: null = owner.parent.parent
+    return root === null ? s.documents : [workspaceId, userId]
+  })
+}))
+
+Def.bind<State>((bind) => ({
+  // @ts-expect-error — a root family's selector has no owner to inspect
+  session: bind.one(Def.Session, (_s, owner) => Option.some(owner.key))
 }))
 
 Reconciler.define((define) => {

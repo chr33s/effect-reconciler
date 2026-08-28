@@ -1,9 +1,9 @@
-import { Context, Effect, Option } from "effect"
+import { Cause, Context, Effect, Option, PubSub } from "effect"
 import { describe, expect, it } from "@effect/vitest"
 import * as Key from "../src/Key.js"
 import * as Reconciler from "../src/Reconciler.js"
-import { LanguageService } from "./fixtures.js"
-import { eventually, settle, StartupFailed } from "./util.js"
+import { LanguageService, SessionService } from "./fixtures.js"
+import { eventually, idle, StartupFailed } from "./util.js"
 
 describe("startup failure", () => {
   it.live("9.9 — a failed provider prevents dependent admission until a valid replacement runs", () =>
@@ -41,13 +41,59 @@ describe("startup failure", () => {
 
       yield* controller.commit({ language: "bad" })
       yield* eventually(() => log.includes("language:begin:bad"), "provider attempted")
-      yield* settle
+      yield* idle(controller)
       // The dependent never starts against a missing/failed provider.
       expect(log.some((e) => e.startsWith("diagnostics:"))).toBe(false)
 
       // A valid replacement becomes Running; the dependent may then start.
       yield* controller.commit({ language: "good" })
       yield* eventually(() => log.includes("diagnostics:good"), "dependent admitted")
+    }))
+
+  it.live("§1.2 — a failed lifetime is observable semantically, with no internals", () =>
+    Effect.gen(function* () {
+      const Def = Reconciler.define((define) => {
+        const Session = define.one("Session", {
+          key: Key.string,
+          start: (userId: string) => Effect.succeed(Context.make(SessionService, { userId }))
+        })
+        const Language = define.one("Language", {
+          key: Key.string,
+          owner: Session,
+          start: (language: string) =>
+            language === "bad"
+              ? new StartupFailed({ reason: "language server did not start" })
+              : Effect.succeed(Context.make(LanguageService, { language }))
+        })
+        return { Session, Language }
+      })
+      const controller = yield* Reconciler.make(
+        Def.bind<{ readonly language: string }>((bind) => ({
+          session: bind.one(Def.Session, () => Option.some("alice")),
+          language: bind.one(Def.Language, (s) => Option.some(s.language))
+        }))
+      )
+
+      const failures = yield* controller.failures
+      yield* controller.commit({ language: "bad" })
+
+      const failure = yield* PubSub.take(failures)
+      // Enough for a control plane to say "language server failed" for this
+      // session, and nothing more.
+      expect(failure.family).toBe("Language")
+      expect(failure.key).toBe("bad")
+      expect(failure.owner?.family).toBe("Session")
+      expect(failure.owner?.key).toBe("alice")
+      expect(failure.owner?.parent).toBe(null)
+      const error = Cause.squash(failure.cause)
+      expect((error as StartupFailed)._tag).toBe("StartupFailed")
+
+      // A healthy replacement produces no further failure event.
+      yield* controller.commit({ language: "good" })
+      yield* idle(controller)
+      expect(yield* PubSub.take(failures).pipe(Effect.timeoutOption(50))).toStrictEqual(
+        Option.none()
+      )
     }))
 
   it.live("§38 — startup failure finalizes partial resources and admits no children", () =>
@@ -81,7 +127,7 @@ describe("startup failure", () => {
 
       yield* controller.commit({ key: "p" })
       yield* eventually(() => log.includes("release:p"), "partial resources finalized")
-      yield* settle
+      yield* idle(controller)
       expect(log).not.toContain("child:start")
 
       // A future desire change creates another physical instance.

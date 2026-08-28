@@ -39,10 +39,13 @@ const Editor = Reconciler.define((define) => {
   return { Session, Workspace }
 })
 
-// 2. Bind any control-state type with pure selectors.
+// 2. Bind any control-state type with pure selectors. Owned selectors receive
+//    the semantic owner reference: its key, and its own owner up to the root.
 const Bound = Editor.bind<Model>((bind) => ({
   session: bind.one(Editor.Session, (model) => model.user),
-  workspace: bind.one(Editor.Workspace, (model, _userId) => model.workspaceId)
+  workspace: bind.one(Editor.Workspace, (model, owner) =>
+    model.workspacesByUser[owner.key] // owner.key is the Session key
+  )
 }))
 
 // 3. Commit state; the runtime converges asynchronously.
@@ -73,6 +76,19 @@ const Diagnostics = define.one("Diagnostics", {
 })
 ```
 
+A control plane can observe the startup failures of lifetimes whose desire is
+still current, so it can surface them in its own model without learning
+anything about physical generations:
+
+```ts
+const failures = yield* controller.failures // subscription owned by this Scope
+const failure = yield* PubSub.take(failures)
+failure.family // "Language"
+failure.key // "typescript"
+failure.owner?.key // the Session key it failed beneath
+failure.cause // why startup failed
+```
+
 Startup environments are typed. Whatever a `start` Effect needs beyond its own
 Scope, its ancestors' published capabilities and its required providers'
 capabilities is a root-environment requirement, and surfaces on
@@ -84,7 +100,10 @@ const controller = Reconciler.make(Bound) // Effect<..., Scope | SettingsService
 ```
 
 See [`examples/editor.ts`](examples/editor.ts) for the full editor topology
-from the spec, bound to two different control planes.
+from the spec, bound to two different control planes, and
+[`examples/foldkit`](examples/foldkit/README.md) for one real Foldkit feature
+implemented with and without the reconciler, with the coordination it deletes
+measured.
 
 ## Semantics proven by the conformance suite
 
@@ -103,6 +122,12 @@ from the spec, bound to two different control planes.
 - shutdown is idempotent, interrupts startups, awaits structured
   finalization; commits after shutdown fail with `ControllerClosed`
 - one Definition binds to multiple state types
+- owned selectors see the whole semantic owner path, so identical direct-owner
+  keys under different ancestors stay distinct
+- `Key.struct` composition stays injective under adversarial component
+  encodings
+- a commit that returns has published; a commit interrupted before its
+  publication point has published nothing
 
 ## Requirements
 
@@ -119,4 +144,8 @@ npm install
 npm run check   # tsc --strict + Effect diagnostics; includes type-misuse assertions
 npm run lint    # Effect language-service diagnostics on their own
 npm test        # @effect/vitest conformance suite
+npm run bench   # scale benchmark, 100 / 1k / 10k lifetimes (see bench/RESULTS.md)
 ```
+
+CI runs `npm ci && npm run check && npm run lint && npm test` on Node LTS and
+current for every push and pull request.

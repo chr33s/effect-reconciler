@@ -2,6 +2,7 @@ import type * as Context from "effect/Context"
 import type * as Effect from "effect/Effect"
 import type * as Scope from "effect/Scope"
 import type { Key } from "./Key.js"
+import type { Owner } from "./Owner.js"
 import type { ReplacementPolicy } from "./Replacement.js"
 
 export const HandleTypeId: unique symbol = Symbol.for("effect-reconciler/Handle")
@@ -14,8 +15,8 @@ export type HandleTypeId = typeof HandleTypeId
  *
  * The type parameters carry the family's static contract (§28, §29):
  *
- * - `K` semantic key type, `OK` the owner family's semantic key type
- *   (`never` for root families)
+ * - `K` semantic key type, `Own` the owner reference its selector receives
+ *   (`null` for root families)
  * - `P` the services this family publishes to its children and dependents
  * - `Env` the services visible to its children: every ancestor's published
  *   services plus its own
@@ -24,7 +25,7 @@ export type HandleTypeId = typeof HandleTypeId
  */
 export interface OneHandle<
   in out K,
-  in out OK = never,
+  in out Own = null,
   out P = never,
   out Env = never,
   out RR = never
@@ -32,7 +33,7 @@ export interface OneHandle<
   readonly [HandleTypeId]: "one"
   readonly name: string
   readonly _key?: K
-  readonly _ownerKey?: OK
+  readonly _owner?: Own
   readonly _provides?: P
   readonly _childEnv?: Env
   readonly _rootRequires?: RR
@@ -41,7 +42,7 @@ export interface OneHandle<
 /** Opaque handle for a `define.many` lifetime family. */
 export interface ManyHandle<
   in out K,
-  in out OK = never,
+  in out Own = null,
   out P = never,
   out Env = never,
   out RR = never
@@ -49,7 +50,7 @@ export interface ManyHandle<
   readonly [HandleTypeId]: "many"
   readonly name: string
   readonly _key?: K
-  readonly _ownerKey?: OK
+  readonly _owner?: Own
   readonly _provides?: P
   readonly _childEnv?: Env
   readonly _rootRequires?: RR
@@ -63,25 +64,37 @@ export type AnyHandle =
 // `any` in an invariant position (`K`, `OK`) makes the extends-check fail
 // against handles whose owner key is `never`, silently yielding `never`.
 
-export type KeyOf<H> = H extends OneHandle<infer K, infer _OK, infer _P, infer _E, infer _RR> ? K
-  : H extends ManyHandle<infer K, infer _OK, infer _P, infer _E, infer _RR> ? K
+export type KeyOf<H> = H extends OneHandle<infer K, infer _Own, infer _P, infer _E, infer _RR> ? K
+  : H extends ManyHandle<infer K, infer _Own, infer _P, infer _E, infer _RR> ? K
   : never
 
+/** The owner reference a family's own selector receives. */
+export type OwnerOf<H> = H extends OneHandle<infer _K, infer Own, infer _P, infer _E, infer _RR>
+  ? Own
+  : H extends ManyHandle<infer _K, infer Own, infer _P, infer _E, infer _RR> ? Own
+  : null
+
+/**
+ * The owner reference the children of `O` receive: `null` when `O` is absent
+ * (a root family), otherwise `O`'s key linked to `O`'s own owner reference.
+ */
+export type OwnerRefFor<O> = [O] extends [never] ? null : Owner<KeyOf<O>, OwnerOf<O>>
+
 /** The services a family publishes to its children and dependents. */
-export type ProvidesOf<H> = H extends OneHandle<infer _K, infer _OK, infer P, infer _E, infer _RR> ? P
-  : H extends ManyHandle<infer _K, infer _OK, infer P, infer _E, infer _RR> ? P
+export type ProvidesOf<H> = H extends OneHandle<infer _K, infer _Own, infer P, infer _E, infer _RR> ? P
+  : H extends ManyHandle<infer _K, infer _Own, infer P, infer _E, infer _RR> ? P
   : never
 
 /** The services a family's children see: every ancestor's published services. */
-export type ChildEnvOf<H> = H extends OneHandle<infer _K, infer _OK, infer _P, infer Env, infer _RR>
+export type ChildEnvOf<H> = H extends OneHandle<infer _K, infer _Own, infer _P, infer Env, infer _RR>
   ? Env
-  : H extends ManyHandle<infer _K, infer _OK, infer _P, infer Env, infer _RR> ? Env
+  : H extends ManyHandle<infer _K, infer _Own, infer _P, infer Env, infer _RR> ? Env
   : never
 
 /** The root-environment services a family's startup still needs. */
-export type RootRequirementsOf<H> = H extends OneHandle<infer _K, infer _OK, infer _P, infer _E, infer RR>
+export type RootRequirementsOf<H> = H extends OneHandle<infer _K, infer _Own, infer _P, infer _E, infer RR>
   ? RR
-  : H extends ManyHandle<infer _K, infer _OK, infer _P, infer _E, infer RR> ? RR
+  : H extends ManyHandle<infer _K, infer _Own, infer _P, infer _E, infer RR> ? RR
   : never
 
 /**
@@ -140,7 +153,7 @@ export interface DefineApi {
     options: LifetimeOptions<K, A, E, R, O, Req>
   ) => OneHandle<
     K,
-    KeyOf<O>,
+    OwnerRefFor<O>,
     Published<A>,
     ChildEnvOf<O> | Published<A>,
     Exclude<R, StartEnv<O, Req>>
@@ -157,7 +170,7 @@ export interface DefineApi {
     options: LifetimeOptions<K, A, E, R, O, Req>
   ) => ManyHandle<
     K,
-    KeyOf<O>,
+    OwnerRefFor<O>,
     Published<A>,
     ChildEnvOf<O> | Published<A>,
     Exclude<R, StartEnv<O, Req>>

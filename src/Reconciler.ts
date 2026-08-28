@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect"
+import type * as PubSub from "effect/PubSub"
 import type * as Scope from "effect/Scope"
 import type { BindApi, Binding, BindingEntry } from "./Binding.js"
 import {
@@ -10,6 +11,7 @@ import {
   type RootRequirementsOf
 } from "./Definition.js"
 import type { BindingError, CommitError, DefinitionError } from "./Errors.js"
+import type { LifetimeFailure } from "./Failure.js"
 import { compileBinding, compileDefinition } from "./internal/compiledDefinition.js"
 import { makeController } from "./internal/controller.js"
 
@@ -74,12 +76,12 @@ export const define = <H extends Record<string, AnyHandle>>(
       one: (handle, selector) => ({
         handle: handle as AnyHandle,
         cardinality: "one",
-        selector: selector as (state: State, ownerKey: unknown) => unknown
+        selector: selector as (state: State, owner: unknown) => unknown
       }),
       many: (handle, selector) => ({
         handle: handle as AnyHandle,
         cardinality: "many",
-        selector: selector as (state: State, ownerKey: unknown) => unknown
+        selector: selector as (state: State, owner: unknown) => unknown
       })
     }
     return { source, entries: Object.values(bf(api)) }
@@ -95,11 +97,17 @@ export const define = <H extends Record<string, AnyHandle>>(
  * replaces the authoritative desired snapshot; the runtime converges
  * asynchronously. It never awaits resource startup, shutdown or convergence.
  *
+ * `failures` subscribes to the startup failures of lifetimes whose desire is
+ * still current, so a control plane can surface them in its own model. Each
+ * subscription is owned by the surrounding Scope and only receives failures
+ * published while it is attached.
+ *
  * `shutdown` is idempotent: it stops accepting commits, invalidates all
  * desire, closes the root Scope and awaits structured finalization.
  */
 export interface Controller<in State> {
   readonly commit: (state: State) => Effect.Effect<void, CommitError>
+  readonly failures: Effect.Effect<PubSub.Subscription<LifetimeFailure>, never, Scope.Scope>
   readonly shutdown: Effect.Effect<void>
 }
 

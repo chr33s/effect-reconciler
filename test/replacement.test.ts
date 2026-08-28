@@ -4,7 +4,7 @@ import * as Key from "../src/Key.js"
 import * as Reconciler from "../src/Reconciler.js"
 import * as Replacement from "../src/Replacement.js"
 import { SettingsService } from "./fixtures.js"
-import { eventually, settle, StartupFailed } from "./util.js"
+import { eventually, idle, StartupFailed } from "./util.js"
 
 describe("replacement", () => {
   it.live("9.7 — sequential replacement with latest-state coalescing (B never starts)", () =>
@@ -42,17 +42,15 @@ describe("replacement", () => {
       yield* eventually(() => log.includes("stopping:A"), "A stopping")
       // ...then C supersedes B while A is still finalizing.
       yield* controller.commit({ key: "C" })
-      yield* settle
-      expect(log).not.toContain("start:B")
-      expect(log).not.toContain("start:C")
 
       // Finalization boundary reached: latest desire (C) starts. B never does.
       yield* Deferred.succeed(stopGate, void 0)
       yield* eventually(() => log.includes("start:C"), "C started")
-      yield* settle
+      yield* idle(controller)
 
-      expect(log).not.toContain("start:B")
-      expect(log.indexOf("stopped:A")).toBeLessThan(log.indexOf("start:C"))
+      // The total order is the proof: B was superseded before the slot freed,
+      // and C only started once A had fully finalized.
+      expect(log).toEqual(["start:A", "stopping:A", "stopped:A", "start:C"])
     }))
 
   it.live("9.8 — overlap replacement permits safe coexistence", () =>
@@ -141,19 +139,19 @@ describe("replacement", () => {
 
       // Child A begins its own (blocked) finalization...
       yield* controller.commit({ revision: 1, childKey: "B" })
-      yield* settle
-      expect(log).not.toContain("child:start:B")
 
       // ...then the owner is replaced (provider change, same key). The
       // owner's Scope-close does not await A's in-flight close, but A's
       // sequential slot must still stay blocked until A truly finalizes.
       yield* controller.commit({ revision: 2, childKey: "B" })
-      yield* settle
-      expect(log).not.toContain("child:start:B")
 
       yield* Deferred.succeed(childStopGate, void 0)
       yield* eventually(() => log.includes("child:start:B"), "child B admitted")
-      expect(log.indexOf("child:stopped:A")).toBeLessThan(log.indexOf("child:start:B"))
+      yield* idle(controller)
+
+      // B never ran beside A, and only started after A's finalization
+      // boundary — across the owner replacement in between.
+      expect(log).toEqual(["child:start:A", "child:stopped:A", "child:start:B"])
     }))
 
   it.live("sequential replacement waits for a failed startup's partial-resource finalizers", () =>
@@ -190,11 +188,12 @@ describe("replacement", () => {
       // A failed; its (blocked) cleanup is still releasing the exclusive
       // resource. The replacement must not start until release completes.
       yield* controller.commit({ key: "B" })
-      yield* settle
-      expect(log).not.toContain("acquire:B")
 
       yield* Deferred.succeed(releaseGate, void 0)
       yield* eventually(() => log.includes("acquire:B"), "B admitted after release")
-      expect(log.indexOf("release:A")).toBeLessThan(log.indexOf("acquire:B"))
+      yield* idle(controller)
+
+      // The exclusive resource was released before it was re-acquired.
+      expect(log).toEqual(["acquire:A", "release:A", "acquire:B"])
     }))
 })

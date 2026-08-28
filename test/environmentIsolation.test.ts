@@ -4,7 +4,7 @@ import * as Key from "../src/Key.js"
 import * as Reconciler from "../src/Reconciler.js"
 import * as Replacement from "../src/Replacement.js"
 import { SessionService, SettingsService } from "./fixtures.js"
-import { eventually, settle } from "./util.js"
+import { eventually, idle } from "./util.js"
 
 describe("environment isolation", () => {
   it.live("9.18 — overlapping owner generations never leak services across generations", () =>
@@ -49,7 +49,11 @@ describe("environment isolation", () => {
 
       yield* controller.commit({ user: "bob" })
       yield* eventually(() => log.includes("observed:acme:key=bob"), "bob tree ready")
-      yield* settle
+
+      // Release the old generation's blocked finalizer and let the controller
+      // converge fully before judging what was observed.
+      yield* Deferred.succeed(stopGate, void 0)
+      yield* idle(controller)
 
       // Both generations existed; each descendant saw exactly its own
       // generation's service. Zero cross-generation observations.
@@ -57,8 +61,6 @@ describe("environment isolation", () => {
         "observed:acme:key=alice",
         "observed:acme:key=bob"
       ])
-
-      yield* Deferred.succeed(stopGate, void 0)
     }))
 
   it.live("§60 — root environment services reach every startup Effect", () =>
@@ -131,7 +133,7 @@ describe("environment isolation", () => {
       // generation sees the new pair, never a mixed set.
       yield* controller.commit({ user: "bob", revision: 2 })
       yield* eventually(() => log.includes("dep:bob:s2"), "new consistent capture")
-      yield* settle
+      yield* idle(controller)
 
       const observations = log.filter((e) => e.startsWith("dep:"))
       expect(observations).toEqual(["dep:alice:s1", "dep:bob:s2"])

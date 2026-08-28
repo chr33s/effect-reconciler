@@ -4,7 +4,7 @@ import * as Key from "../src/Key.js"
 import * as Reconciler from "../src/Reconciler.js"
 import * as Replacement from "../src/Replacement.js"
 import { bindEditor, makeEditor, model, SessionService } from "./fixtures.js"
-import { count, eventually, settle } from "./util.js"
+import { count, eventually, idle } from "./util.js"
 
 describe("ownership", () => {
   it.live("9.3 — owner invalidation closes all descendants structurally", () =>
@@ -88,11 +88,64 @@ describe("ownership", () => {
 
       yield* controller.commit({ user: "alice" })
       yield* eventually(() => log.includes("session:starting:alice"), "session starting")
-      yield* settle
-      expect(log).not.toContain("workspace:start:acme")
 
       yield* Deferred.succeed(gate, void 0)
       yield* eventually(() => log.includes("workspace:start:acme"), "workspace admitted")
+      yield* idle(controller)
+
+      // The child was admitted only once its owner reached Running: the total
+      // order proves it without a timing window.
+      expect(log).toEqual([
+        "session:starting:alice",
+        "session:running:alice",
+        "workspace:start:acme"
+      ])
+    }))
+
+  it.live("owned selectors see the semantic owner path, not just the direct owner key", () =>
+    Effect.gen(function* () {
+      const log: Array<string> = []
+      const Def = Reconciler.define((define) => {
+        const Organization = define.many("Organization", {
+          key: Key.string,
+          start: (id: string) => Effect.sync(() => log.push(`org:${id}`))
+        })
+        const Workspace = define.one("Workspace", {
+          key: Key.string,
+          owner: Organization,
+          start: (id: string) => Effect.sync(() => log.push(`workspace:${id}`))
+        })
+        const Document = define.many("Document", {
+          key: Key.string,
+          owner: Workspace,
+          start: (uri: string) => Effect.sync(() => log.push(`document:${uri}`))
+        })
+        return { Organization, Workspace, Document }
+      })
+
+      const controller = yield* Reconciler.make(
+        Def.bind<{ readonly open: boolean }>((bind) => ({
+          organizations: bind.many(Def.Organization, () => ["A", "B"]),
+          // Deliberately the same direct owner key beneath both organizations.
+          workspace: bind.one(Def.Workspace, () => Option.some("main")),
+          // Desire differs by ancestor, with no ancestor identity smuggled
+          // into the Workspace key.
+          documents: bind.many(Def.Document, (s, owner) =>
+            !s.open ? [] : owner.parent.key === "A" ? ["a-only"] : ["b-only"]
+          )
+        }))
+      )
+
+      yield* controller.commit({ open: true })
+      yield* eventually(
+        () => log.includes("document:a-only") && log.includes("document:b-only"),
+        "both ancestor paths converged"
+      )
+
+      // Two physically distinct Workspace[main] lifetimes, one per ancestor.
+      expect(count(log, "workspace:main")).toBe(2)
+      expect(count(log, "document:a-only")).toBe(1)
+      expect(count(log, "document:b-only")).toBe(1)
     }))
 
   it.live("9.6 — late child startup completion cannot outlive its replaced owner", () =>
@@ -159,7 +212,7 @@ describe("ownership", () => {
 
       // Let W#1's startup complete late.
       yield* Deferred.succeed(lateGate, void 0)
-      yield* settle
+      yield* idle(controller)
 
       // W#1 never became Running: it never admitted its Marker.
       expect(log.filter((e) => e.startsWith("marker:"))).toEqual(["marker:bob"])
