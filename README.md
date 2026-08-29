@@ -58,6 +58,21 @@ it. Nothing else starts or stops it. There is no `start`, `stop`, `restart` or
 `invalidate` to call, and that absence is the design: a lifecycle you cannot
 drive by hand is a lifecycle that cannot drift from your state.
 
+A semantic lifetime's identity is **family handle + key + owner path**. Keys
+use Effect's `Equal` / `Hash` semantics, so plain objects, arrays and `Data`
+values compare structurally without an encoding step. That comes with a real
+caller contract:
+
+- **Keys are immutable.** The runtime caches identity hashes; mutating a key
+  after it has been desired corrupts the identity under which it was admitted.
+- **Equality must be stable across commits.** A reference-compared key — a
+  function, or a value wrapped in `Equal.byReference` — must be the same
+  reference on each equivalent commit. Rebuilding it intentionally means a
+  different lifetime and therefore replacement.
+- Put something in the key exactly when changing it should create a different
+  semantic lifetime. State a running lifetime should observe without being
+  replaced belongs in `observes`, not in its key.
+
 ## Usage
 
 ```ts
@@ -165,6 +180,17 @@ for (const { lifetime, status } of snapshot.lifetimes) {
 }
 ```
 
+Retry exists at two different lifecycle levels:
+
+| API | what another attempt means |
+| :--- | :--- |
+| `Effect.retry` **inside `start`** | Run the startup operation again inside the **same physical generation and Scope**. The Reconciler continues to report `Starting` and sees only the eventual success or ultimate failure. |
+| `Controller.retry(ref)` / `Supervision.restart(schedule)` | After startup has become `Failed`, retire that failed generation and admit a **new physical generation** when its owner, providers and replacement policy permit. The semantic identity — family, key and owner path — does not change. |
+
+In short: `Effect.retry` retries *within startup*; Controller retry and
+supervision replace a *failed startup generation*. Neither restarts a lifetime
+that is already Running.
+
 For understanding the runtime rather than driving it, there is a diagnostic
 half — lossy, never authoritative, and built only while something is watching:
 
@@ -213,9 +239,10 @@ Three optional declarations, all off by default, all measured or bounded
 rather than assumed:
 
 ```ts
-// Restart a failed *startup* on a schedule — the one case ordinary
-// `Effect.retry` inside `start` cannot reach, because the slot and the key
-// belong to the runtime. Never touches a running lifetime (spec §9.8).
+// Replace a Failed startup generation on a schedule. This is the second retry
+// level described above: unlike `Effect.retry` inside `start`, each scheduled
+// attempt gets a new physical generation. Never touches a Running lifetime
+// (spec §9.8).
 define.one("Server", {
   supervision: Supervision.restart(
     Schedule.exponential("100 millis").pipe(Schedule.upTo({ times: 5 }))
@@ -387,12 +414,12 @@ depending on an implementation detail.
 ## Non-goals
 
 Supervision is the sharpest example of the boundary. A restart policy here
-covers a **startup that failed** and nothing else: a lifetime *is* its Scope,
-so once `start` returns, whatever it forked inside that Scope is its own
-business, and `Effect.retry` inside `start` — next to the code that knows what
-broke — is a better tool than anything this could offer. The one thing an
-application cannot do for itself is retire a generation in a slot the runtime
-owns, under a key the runtime assigned.
+covers a **startup that became Failed** and nothing else. `Effect.retry` inside
+`start` makes another attempt inside the same physical generation and Scope;
+`Controller.retry` and `Supervision.restart` retire the Failed generation and
+allow a new physical generation under the same semantic identity. Once
+`start` returns, the lifetime is Running and whatever it forked inside its
+Scope is its own business — supervision here never restarts it.
 
 This does not replace `Effect`, `Scope`, `Layer`, `Context`, `Fiber`, `Stream`,
 `RcMap` or `LayerMap` — it coordinates them. Effect answers how work executes,
