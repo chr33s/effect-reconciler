@@ -25,7 +25,10 @@ would not be the services your code asks for.
 
 > **Experimental `0.x`.** The kernel and its semantics are specified in
 > [`docs/spec.md`](docs/spec.md) and held to the conformance suite (spec §14).
-> `Definition`, `Binding`, `commit`, `status`, `snapshot` and `shutdown` are
+> The project is currently testing a smaller Layer + Atom rebase; see the
+> [experiment and measured findings](experiments/layer-atom/README.md). No
+> architecture claim has been changed yet. `Definition`, `Binding`, `commit`,
+> `status`, `snapshot` and `shutdown` are
 > the parts meant to be built on. **`retry`, `failures`, `changes`, `events`,
 > `diagnostics`, supervision policies, incremental `deps` and observed state
 > are unstable** and may change shape within `0.x` — they are specified,

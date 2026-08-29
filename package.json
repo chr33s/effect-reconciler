@@ -97,6 +97,8 @@
     "lint": "effect-tsgo diagnostics --project tsconfig.json --format pretty",
     "test": "vitest run",
     "bench": "vitest run --config bench/vitest.config.ts",
+    "experiment:layer-atom": "vitest run experiments/layer-atom/*.test.ts",
+    "experiment:layer-atom:bench": "vitest run --config bench/vitest.config.ts experiments/layer-atom/scale.bench.ts",
     "example:metrics": "node examples/foldkit/metrics.mjs",
     "example:migration-metrics": "node examples/foldkit-migration/metrics.mjs",
     "prepare": "effect-tsgo patch --typescript --no-oxlint",

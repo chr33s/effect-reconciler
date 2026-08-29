@@ -5,7 +5,7 @@ import { defineConfig } from "vitest/config"
 // fast enough to run continuously.
 export default defineConfig({
   test: {
-    include: ["bench/**/*.bench.ts"],
+    include: ["bench/**/*.bench.ts", "experiments/**/*.bench.ts"],
     testTimeout: 600_000,
     hookTimeout: 600_000,
     pool: "forks"
