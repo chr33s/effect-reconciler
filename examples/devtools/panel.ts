@@ -24,7 +24,7 @@
 import { Effect, Equal, Stream } from "effect"
 import type { Diagnostics, ReconcileEvent } from "../../src/Diagnostics.js"
 import type { Controller } from "../../src/Reconciler.js"
-import type { LifetimeEntry, Snapshot } from "../../src/Snapshot.js"
+import type { GenerationId, LifetimeEntry, Snapshot } from "../../src/Snapshot.js"
 
 /** How many recent events the panel keeps. A window, not a log. */
 const HISTORY = 40
@@ -46,6 +46,7 @@ export interface Panel {
   readonly refresh: Effect.Effect<void>
 }
 
+/** What a lifetime is called on screen: family and key, no owner chain. */
 const label = (entry: LifetimeEntry["lifetime"]): string =>
   `${entry.family.name}:${String(entry.key)}`
 
@@ -82,28 +83,43 @@ const eventText = (event: ReconcileEvent): string => {
 /**
  * The tree, drawn from the snapshot alone.
  *
+ * Children are grouped by their owner's **generation**, never by anything
+ * derived from the owner's `LifetimeRef`. A reference names a lifetime, and
+ * one lifetime can have two generations in a snapshot at once — a `Stopping`
+ * one draining beside the `Running` one replacing it. Grouping by reference
+ * draws every child under both of them and shows each generation the other's
+ * children. Grouping by generation is exact, needs no string encoding of a
+ * key (`Snapshot` deliberately has none, and inventing one here would put
+ * escaping and collision safety back on this file), and costs one map probe
+ * per entry instead of rebuilding an owner path three times.
+ *
  * The snapshot promises owners before children, so one pass over it builds
  * the whole thing: every entry's owner has already been placed.
  */
 const tree = (snapshot: Snapshot): ReadonlyArray<string> => {
-  const children = new Map<string, Array<LifetimeEntry>>()
+  const present = new Set(snapshot.lifetimes.map((entry) => entry.generation))
+  const children = new Map<GenerationId, Array<LifetimeEntry>>()
   const roots: Array<LifetimeEntry> = []
   for (const entry of snapshot.lifetimes) {
-    const parent = entry.lifetime.parent
-    if (parent === null) {
+    const owner = entry.owner
+    // A generation can outlive its owner in the snapshot: an owner whose
+    // close has finished is forgotten, while a child that had its own close
+    // in flight is skipped by that sweep and dropped later by its own fiber.
+    // Drawing such an entry at the root is a strange-looking panel; not
+    // drawing it is a panel that has quietly lost a lifetime, which is worse.
+    if (owner === null || !present.has(owner)) {
       roots.push(entry)
       continue
     }
-    const key = label(parent)
-    const list = children.get(key)
-    if (list === undefined) children.set(key, [entry])
+    const list = children.get(owner)
+    if (list === undefined) children.set(owner, [entry])
     else list.push(entry)
   }
 
   const lines: Array<string> = []
   const draw = (entry: LifetimeEntry, prefix: string, last: boolean): void => {
     lines.push(`${prefix}${prefix === "" ? "" : last ? "└─ " : "├─ "}${label(entry.lifetime)}  ${statusText(entry)}`)
-    const kids = children.get(label(entry.lifetime)) ?? []
+    const kids = children.get(entry.generation) ?? []
     const nextPrefix = prefix === "" ? "  " : `${prefix}${last ? "   " : "│  "}`
     kids.forEach((kid, index) => draw(kid, nextPrefix, index === kids.length - 1))
   }
@@ -175,7 +191,14 @@ export const make = <State>(
   })
 
 /** True when two models would render identically — for a host that wants to
- * avoid repainting a terminal that has not changed. */
+ * avoid repainting a terminal that has not changed.
+ *
+ * Compared structurally, because that is the question being asked. Every
+ * `Controller.snapshot` allocates a fresh value, so a host refreshing on a
+ * timer would repaint on every tick if this compared snapshots by reference —
+ * which is exactly the work it exists to avoid. Entries are plain records of
+ * an `Equal`-comparable reference, a status and two generation tokens, so
+ * `Equal.equals` answers it directly. */
 export const same = (a: PanelModel, b: PanelModel): boolean =>
   a.recent === b.recent && Equal.equals(a.diagnostics, b.diagnostics) &&
-  a.snapshot === b.snapshot
+  Equal.equals(a.snapshot.lifetimes, b.snapshot.lifetimes)

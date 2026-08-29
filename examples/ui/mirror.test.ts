@@ -150,16 +150,18 @@ describe("ui mirror", () => {
         const controller = yield* Reconciler.make(bindConnections(definition))
         let reads = 0
         // Spreading keeps the controller's test hooks, so `idle` still works
-        // through the wrapper; only `status` is instrumented.
+        // through the wrapper; only the read the mirror actually makes is
+        // instrumented. It takes one coherent `snapshot` per flush rather than
+        // a `status` per watched lifetime, so counting snapshots is counting
+        // times the mirror went to the runtime at all.
         const counted: typeof controller = {
           ...controller,
-          status: (target) =>
-            Effect.andThen(
-              Effect.sync(() => {
-                reads++
-              }),
-              controller.status(target)
-            )
+          snapshot: Effect.andThen(
+            Effect.sync(() => {
+              reads++
+            }),
+            controller.snapshot
+          )
         }
         const mirror = yield* Mirror.make(counted)
         const a = connectionRef(definition, "a.example")
@@ -188,6 +190,47 @@ describe("ui mirror", () => {
         mirror.commit(emptyState)
         yield* Deferred.await(gone)
         expect(reads).toBeGreaterThan(afterConverging)
+      })
+    ))
+
+  it.live("a reference from another Definition does not take the mirror with it", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const behaviour = makeBehaviour()
+        const definition = defineConnections(behaviour)
+        const controller = yield* Reconciler.make(bindConnections(definition))
+        const defects: Array<unknown> = []
+        const mirror = yield* Mirror.make(controller, {
+          onDefect: (cause) => defects.push(cause)
+        })
+        const settle = Effect.andThen(mirror.flush, Effect.andThen(idle(controller), mirror.flush))
+
+        // A component built this against a *different* Definition — two
+        // Definitions in one app, or a duplicate installed copy of the
+        // package. It cannot name anything in this runtime, so reading it is
+        // a defect rather than a `None` that would be indistinguishable from
+        // "not running".
+        const foreign = connectionRef(defineConnections(makeBehaviour()), "a.example")
+        const ours = connectionRef(definition, "a.example")
+
+        const seen: Array<string> = []
+        yield* Effect.sync(() => mirror.watch(foreign, () => seen.push("foreign")))
+        yield* Effect.sync(() => mirror.watch(ours, () => seen.push("ours")))
+        mirror.commit(withHosts("a.example"))
+        yield* settle
+
+        // The bad reference is reported once per read and costs its own
+        // component its reading — and nothing else. `Effect.ignore` does not
+        // catch a defect, so a mirror that used it lost the whole work loop
+        // here: every lifetime on screen frozen at its last reading, silently.
+        expect(defects.length).toBeGreaterThan(0)
+        expect(Option.getOrNull(mirror.statusOf(ours))?._tag).toBe("Running")
+        expect(seen).toContain("ours")
+
+        // Still live afterwards: a later transition is still mirrored.
+        mirror.commit(emptyState)
+        yield* settle
+        expect(mirror.statusOf(ours)._tag).toBe("None")
       })
     ))
 

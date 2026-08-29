@@ -50,13 +50,6 @@ export const eventually = (
 }
 
 /**
- * A real-time window in which nothing further is expected to happen.
- *
- * Only for the few assertions that cannot use `idle`: proving the absence of
- * an event while a lifetime is deliberately wedged, or after shutdown has
- * stopped the reconcile loop, where no convergence barrier can exist.
- */
-/**
  * Subscribe to a Controller's live failure Stream, returning a queue the test
  * can pull from. Subscribing eagerly (rather than folding the Stream in a
  * forked fiber) means a commit made after this returns cannot race the
@@ -161,6 +154,13 @@ export const awaitStatus = <State>(
   )
 }
 
+/**
+ * A real-time window in which nothing further is expected to happen.
+ *
+ * Only for the few assertions that cannot use `idle`: proving the absence of
+ * an event while a lifetime is deliberately wedged, or after shutdown has
+ * stopped the reconcile loop, where no convergence barrier can exist.
+ */
 export const quietFor = (millis = 60): Effect.Effect<void> => Effect.sleep(millis)
 
 export const count = (log: ReadonlyArray<string>, entry: string): number =>

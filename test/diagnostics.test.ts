@@ -169,6 +169,48 @@ describe("event stream", () => {
 })
 
 describe("counters", () => {
+  it.live("§9.7 — selector counts what was evaluated, not what was published", () =>
+    Effect.gen(function* () {
+      const { binding } = makeApp()
+      const controller = yield* Reconciler.make(binding)
+
+      yield* controller.commit({ settings: Option.some(1), docs: ["a.ts"] })
+      yield* idle(controller)
+      const before = (yield* controller.diagnostics).selectorEvaluations
+      expect(before).toBeGreaterThan(0)
+
+      // Every selector ran; the desired state they produced is invalid, so
+      // nothing is published. The evaluations happened either way, and that is
+      // the whole distinction: a counter copied at evaluation time and written
+      // in the publication region never records them at all — and, because
+      // evaluation happens outside the mutex, two concurrent commits can write
+      // those copies out of order and hand a reader a *negative* rate between
+      // two samples. Read from the memory under the mutex, the count is what
+      // the runtime actually did.
+      const failed = yield* Effect.result(
+        controller.commit({ settings: Option.some(1), docs: ["dup.ts", "dup.ts"] })
+      )
+      expect(failed._tag).toBe("Failure")
+      const after = (yield* controller.diagnostics).selectorEvaluations
+      expect(after).toBeGreaterThan(before)
+
+      // And so it is worth subtracting: successive readings never go back.
+      const readings: Array<number> = [after]
+      for (let round = 0; round < 6; round++) {
+        yield* Effect.all(
+          [
+            controller.commit({ settings: Option.some(round), docs: ["a.ts"] }),
+            controller.commit({ settings: Option.some(round), docs: ["a.ts", "b.ts"] })
+          ],
+          { concurrency: "unbounded" }
+        )
+        readings.push((yield* controller.diagnostics).selectorEvaluations)
+      }
+      for (let i = 1; i < readings.length; i++) {
+        expect(readings[i]!).toBeGreaterThanOrEqual(readings[i - 1]!)
+      }
+    }))
+
   it.live("§9.7 — count what the runtime did, and are always available", () =>
     Effect.gen(function* () {
       const { binding } = makeApp()

@@ -5,6 +5,7 @@ import type { SupervisionPolicy } from "../Supervision.js"
 import type { Binding } from "../Binding.js"
 import {
   asInternal,
+  declaresObservation,
   HandleTypeId,
   isHandle,
   type AnyHandle,
@@ -21,6 +22,7 @@ import {
   ForeignRequirement,
   MissingBinding,
   MissingObservation,
+  ObservationRequired,
   OwnershipCycle,
   UnexpectedObservation,
   UnresolvableProvider,
@@ -98,6 +100,16 @@ export const compileDefinition = (
       chain = [...families[ownerId]!.chain, handle.familyId]
     } else {
       chain = [handle.familyId]
+    }
+
+    // A `start` that declared it reads projected state is asking for a
+    // projection a family without `observes` has none of. The declaration is
+    // the witness — see `requiresObservation` for why neither the type system
+    // nor the function's arity can be one — and checking it here turns an
+    // opaque `TypeError` inside a startup Effect into a named error about a
+    // named family.
+    if (declaresObservation(handle.start) && !handle.observes) {
+      return Result.fail(new ObservationRequired({ family }))
     }
 
     const ownerChain = chain.slice(0, -1)

@@ -7,6 +7,7 @@ import type { BindApi, Binding, BindingEntry, LabeledEntry } from "./Binding.js"
 import {
   HandleTypeId,
   observed as observedWitness,
+  requiresObservation as requiresObservationWitness,
   type AnyHandle,
   type DefineApi,
   type DefinitionIdentity,
@@ -201,6 +202,29 @@ export const make = <State, RootR = never>(
 export const observed = observedWitness
 
 /**
+ * Declare that a `start` reads the projected state it is handed, so a family
+ * built from it without `observes` is rejected as `ObservationRequired` at
+ * `Reconciler.make` rather than failing as an anonymous `TypeError` inside a
+ * startup Effect.
+ *
+ * Only the function's own author can say this. With no `observes` the
+ * observation parameter's type is `never`, which every annotation accepts, so
+ * the type system cannot; and arity cannot either, because a `start` is free
+ * to declare a second parameter it ignores — or to take none and read its
+ * arguments some other way.
+ *
+ * `Reconciler.nested` marks its own `start`. Reach for this when writing a
+ * `start` helper of the same shape.
+ *
+ * ```ts
+ * const tailing = Reconciler.requiresObservation(
+ *   (key: string, state: SubscriptionRef.SubscriptionRef<Model>) => …
+ * )
+ * ```
+ */
+export const requiresObservation = requiresObservationWitness
+
+/**
  * A lifetime that runs a Reconciler of its own.
  *
  * ```ts
@@ -250,7 +274,10 @@ export const observed = observedWitness
  */
 export const nested = <K = null>() =>
 <SubState, RootR = never>(binding: Binding<SubState, RootR>) =>
-(
+// Marked, because this `start` reads the projection it is handed and a family
+// that hosts it without `observes` has none to hand it. That is the one thing
+// about a `start` neither the type system nor its arity can decide.
+requiresObservationWitness((
   _key: K,
   state: SubscriptionRef.SubscriptionRef<SubState>
 ): Effect.Effect<void, DefinitionError | BindingError | CommitError, Scope.Scope | RootR> =>
@@ -267,6 +294,35 @@ export const nested = <K = null>() =>
         // just committed. That costs nothing: an equivalent commit is exactly
         // zero churn (§8.4), which is the same property that lets a UI commit
         // on every keystroke.
-        Effect.orDie(controller.commit(next)))
+        controller.commit(next)).pipe(
+          // Both outcomes below end the loop, and that is the point of handling
+          // them out here rather than per value. Neither error is transient:
+          // once the child answers either one it will answer it for every
+          // projection that follows, and a loop that swallowed it in place
+          // would go on fully evaluating the child's whole Binding — and
+          // discarding the result — for the rest of the host's life.
+          //
+          // The child is shut down by the closing of this lifetime's Scope,
+          // and this fiber is interrupted by the same close — in whichever
+          // order the runtime picks. A commit that loses that race is teardown
+          // proceeding normally, not a fault, so it simply finishes the loop.
+          Effect.catchTag("ControllerClosed", () => Effect.void),
+          // Anything else is an invalid desired state produced by the child's
+          // own selectors, from a projection that arrived after startup. That
+          // is an application bug of the class §13.11 calls a defect, and it
+          // is fatal to this loop: the host lifetime stays Running while its
+          // child stops following the parent's state. Said out loud, because
+          // the runtime has no way to say it through `status` — the host's
+          // resources are all still healthy.
+          Effect.tapError((error) =>
+            Effect.logError(
+              "effect-reconciler: a nested Reconciler could not commit a projection " +
+                "and has stopped following its parent. The lifetime hosting it is " +
+                "still Running; its child is frozen at the last state it accepted.",
+              error
+            )
+          ),
+          Effect.orDie
+        )
     )
-  })
+  }))

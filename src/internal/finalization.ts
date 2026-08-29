@@ -22,6 +22,14 @@ export interface Finalization {
    * Initiate (or join) the dedicated close of one generation's Scope. The
    * returned Effect completes only when that generation's finalizers have
    * fully run.
+   *
+   * The `closing` deferred is claimed when this function is **called**, not
+   * when the returned Effect runs, and every caller calls it under the
+   * controller's mutex. Claiming it inside the Effect would leave it unclaimed
+   * until the fiber the caller forks took its first step — and a caller that
+   * forks the close and then releases the mutex (a failed startup) would let
+   * `settled` report the controller converged while that generation's partial
+   * resources had not begun finalizing.
    */
   readonly closeInstance: (
     inst: LiveInstance,
@@ -57,17 +65,16 @@ export const makeFinalization = (options: {
   const closeInstance = (
     inst: LiveInstance,
     exit: Exit.Exit<unknown, unknown>
-  ): Effect.Effect<void> =>
-    Effect.suspend(() => {
-      if (inst.closing !== null) return Deferred.await(inst.closing)
-      const done = Deferred.makeUnsafe<void>()
-      inst.closing = done
-      return pipe(
-        Scope.close(inst.scope, exit),
-        Effect.ensuring(Deferred.succeed(done, void 0)),
-        Effect.asVoid
-      )
-    })
+  ): Effect.Effect<void> => {
+    if (inst.closing !== null) return Deferred.await(inst.closing)
+    const done = Deferred.makeUnsafe<void>()
+    inst.closing = done
+    return pipe(
+      Scope.close(inst.scope, exit),
+      Effect.ensuring(Deferred.succeed(done, void 0)),
+      Effect.asVoid
+    )
+  }
 
   /**
    * The part of the subtree whose finalization this generation's close

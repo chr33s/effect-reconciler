@@ -2,7 +2,7 @@ export * as Reconciler from "./Reconciler.js"
 export * as Replacement from "./Replacement.js"
 export * as Supervision from "./Supervision.js"
 
-export { observed } from "./Definition.js"
+export { observed, requiresObservation } from "./Definition.js"
 export type { AnyHandle, DefineApi, ManyHandle, Observed, OneHandle } from "./Definition.js"
 export type {
   Diagnostics,
@@ -12,7 +12,7 @@ export type {
 } from "./Diagnostics.js"
 export type { LifetimeFailure } from "./Failure.js"
 export type { LifetimeRef } from "./LifetimeRef.js"
-export type { LifetimeEntry, Snapshot } from "./Snapshot.js"
+export type { GenerationId, LifetimeEntry, Snapshot } from "./Snapshot.js"
 export type { LifetimeStatus } from "./Status.js"
 export type {
   BindApi,
@@ -40,6 +40,7 @@ export {
   InvalidSelectorResult,
   MissingBinding,
   MissingObservation,
+  ObservationRequired,
   OwnershipCycle,
   SelectorFailed,
   UnexpectedObservation,

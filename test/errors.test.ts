@@ -32,6 +32,8 @@ const explain = <A>(
       ForeignRequirement: (error) =>
         Effect.succeed(`foreign requirement ${error.family.name}.${error.requirement}`),
       OwnershipCycle: (error) => Effect.succeed(`ownership cycle at ${error.family.name}`),
+      ObservationRequired: (error) =>
+        Effect.succeed(`${error.family.name} takes observed state but declares none`),
       CapabilityCycle: (error) => Effect.succeed(`capability cycle at ${error.family.name}`),
       ForeignHandle: (error) => Effect.succeed(`foreign handle bound as ${error.label}`),
       MissingBinding: (error) => Effect.succeed(`missing binding for ${error.family.name}`),

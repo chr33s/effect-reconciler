@@ -323,6 +323,44 @@ export const isHandle = (u: unknown): u is InternalHandle =>
 export const asInternal = (handle: AnyHandle): InternalHandle =>
   handle as unknown as InternalHandle
 
+/**
+ * Where a `start` records that it cannot run without projected state.
+ *
+ * Nothing else can decide this. The type system cannot: with no `observes`
+ * the observation parameter's type is `never`, and `never` is assignable to
+ * every annotation a `start` could give it — including the `any` of a
+ * two-parameter helper reused as `start`. Function arity cannot either: it is
+ * blind to rest and defaulted parameters, and it condemns every `start` that
+ * merely happens to declare a second argument it ignores, which is a
+ * perfectly valid family. What *is* decidable is what the function's own
+ * producer says about it, which is what this records.
+ */
+const RequiresObservationId: unique symbol = Symbol.for(
+  "effect-reconciler/RequiresObservation"
+)
+
+/**
+ * Declare that a `start` reads the projected state it is handed, so a family
+ * built from it without `observes` is rejected by name at `Reconciler.make`
+ * instead of failing as an anonymous `TypeError` inside a startup Effect.
+ *
+ * `Reconciler.nested` marks its own `start` with this. Reach for it when
+ * writing a `start` helper of the same shape — one whose second parameter is
+ * not optional to its behaviour.
+ */
+export const requiresObservation = <F extends (key: never, observed: never) => unknown>(
+  start: F
+): F => {
+  Object.defineProperty(start, RequiresObservationId, { value: true })
+  return start
+}
+
+/** Whether a `start` declared, through `requiresObservation`, that it reads
+ * the projected state it is handed. */
+export const declaresObservation = (start: unknown): boolean =>
+  typeof start === "function" &&
+  (start as { readonly [RequiresObservationId]?: unknown })[RequiresObservationId] === true
+
 /** The compiled-from source of a Definition: every family in creation order. */
 export interface DefinitionSource {
   readonly identity: DefinitionIdentity

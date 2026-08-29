@@ -1,8 +1,9 @@
-import { Cause, Context, Effect, Option, Queue } from "effect"
+import { Cause, Context, Effect, Latch, Option, Queue, Stream } from "effect"
 import { describe, expect, it } from "@effect/vitest"
+import type { ReconcileEvent } from "../src/Diagnostics.js"
 import * as Reconciler from "../src/Reconciler.js"
 import { LanguageService, SessionService } from "./fixtures.js"
-import { drainFailures, eventually, failureQueue, idle, StartupFailed } from "./util.js"
+import { drainFailures, eventually, failureQueue, idle, quietFor, StartupFailed } from "./util.js"
 
 describe("startup failure", () => {
   it.live("9.9 — a failed provider prevents dependent admission until a valid replacement runs", () =>
@@ -125,6 +126,71 @@ describe("startup failure", () => {
       // A future desire change creates another physical instance.
       yield* controller.commit({ key: "q" })
       yield* eventually(() => log.includes("acquire:q"), "new physical attempt")
+    }))
+
+  it.live("§6.6 — no pass reports convergence while a failed startup is still finalizing", () =>
+    Effect.gen(function* () {
+      const log: Array<string> = []
+      const gate = yield* Latch.make(false)
+      const Def = Reconciler.define((define) => ({
+        Parent: define.one("Parent", {
+          start: (k: string) =>
+            Effect.gen(function* () {
+              yield* Effect.acquireRelease(
+                Effect.sync(() => log.push(`acquire:${k}`)),
+                () => Effect.andThen(gate.await, Effect.sync(() => log.push(`release:${k}`)))
+              )
+              return yield* new StartupFailed({ reason: "startup failed" })
+            })
+        })
+      }))
+      const controller = yield* Reconciler.make(
+        Def.bind<{ readonly key: string }>((bind) => ({
+          parent: bind.one(Def.Parent, (s) => Option.some(s.key))
+        }))
+      )
+      const events = yield* Stream.toQueue(controller.events, { capacity: 256 })
+      yield* Effect.sleep(30)
+
+      // The startup acquires a resource whose finalizer is wedged on the gate
+      // below, then fails. The generation is Failed at once; what it acquired
+      // is not released until the gate opens. Everything up to that point is
+      // gathered before asserting, so a failed expectation can never leave the
+      // gate shut and wedge this test's own teardown.
+      yield* controller.commit({ key: "p" })
+      yield* eventually(() => log.includes("acquire:p"), "partial resource acquired")
+      yield* quietFor()
+      const releasedEarly = log.includes("release:p")
+
+      const seen: Array<ReconcileEvent> = []
+      while (true) {
+        const next = yield* Effect.timeoutOption(Effect.result(Queue.take(events)), 20)
+        if (Option.isNone(next) || next.value._tag === "Failure") break
+        if (next.value.success !== undefined) seen.push(next.value.success)
+      }
+      const failedAt = seen.findIndex((e) => e._tag === "StartupFailed")
+      const passesAfter = seen
+        .slice(failedAt)
+        .filter((e) => e._tag === "PassCompleted") as ReadonlyArray<
+          Extract<ReconcileEvent, { readonly _tag: "PassCompleted" }>
+        >
+
+      yield* gate.open
+      yield* idle(controller)
+
+      expect(releasedEarly).toBe(false)
+      // A reconcile pass runs immediately behind the failure, and what it
+      // decides is what every convergence observer is told. A pass that can run
+      // before the failed generation's close has even been claimed reports a
+      // settled controller while a finalizer has not begun — which is the one
+      // thing `settled` exists to deny.
+      expect(failedAt).toBeGreaterThanOrEqual(0)
+      expect(passesAfter.length).toBeGreaterThan(0)
+      expect(passesAfter.map((e) => e.settled)).not.toContain(true)
+
+      // Released, the close reaches its boundary and convergence means it.
+      expect(log).toContain("release:p")
+      expect((yield* controller.diagnostics).settled).toBe(true)
     }))
 
   it.live("a start Effect that interrupts itself is treated as failure, not left wedged", () =>

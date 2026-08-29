@@ -19,6 +19,13 @@ export type Lifecycle = "starting" | "running" | "stopping" | "failed"
 /** One physical generation of a keyed lifetime. Semantic identity is the
  * path; physical identity is the object itself. */
 export interface LiveInstance {
+  /**
+   * Physical identity as a value. The object itself is already the physical
+   * identity, but nothing outside this process can be handed an object — so
+   * anything that has to tell two generations of one semantic lifetime apart
+   * (a snapshot's consumers, above all) is given this instead.
+   */
+  readonly generation: number
   readonly familyId: number
   readonly key: unknown
   /** Structural semantic identity: family, key and owner chain. */

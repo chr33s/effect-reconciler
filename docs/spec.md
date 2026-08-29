@@ -625,22 +625,32 @@ controller.snapshot    // Effect<Snapshot>
 ```
 
 > Every generation the runtime is tracking, read at one instant: a
-> `(LifetimeRef, LifetimeStatus)` for each, owners before children.
+> `(LifetimeRef, LifetimeStatus)` for each, plus which generation it is and
+> which generation owns it, owners before children.
 
-A snapshot adds no vocabulary — every entry is the pair a single `status` call
-already produces — so §9.4 is untouched. What it adds is *coherence*. N
-separate `status` calls interleave with N−1 opportunities for the runtime to
-move underneath them, and a tree assembled from them can show a child Running
+A snapshot adds almost no vocabulary — every entry is the pair a single
+`status` call already produces, and the generation tokens beside it say only
+*that* two entries are different generations, never anything about what a
+generation is — so §9.4 is untouched. What it adds is *coherence*. N separate
+`status` calls interleave with N−1 opportunities for the runtime to move
+underneath them, and a tree assembled from them can show a child Running
 beneath an owner that has already stopped. A snapshot is taken under the same
 serialization the reconciler mutates under, so it cannot.
 
 Generations that are `Stopping` appear: they exist, and a view that omitted
 them would show a slot as free while the resource in it is still draining.
-`snapshot.get(ref)` answers exactly as `status` did at that instant.
+That is also why an entry carries its own `generation` and its `owner`'s. A
+`LifetimeRef` names a lifetime, and under `Replacement.overlap()` one lifetime
+has two generations in the same snapshot — so a tree that grouped children by
+the owner's reference would draw each child under both of them and show each
+generation the other's children. Grouping by `owner` is exact.
+`snapshot.get(ref)` answers exactly as `status` did at that instant: for the
+generation currently holding the identity, falling back to one still draining.
 
 It is a value, not a view. It does not update; take another when `changes`
 says something moved. The cost is one pass over live generations, paid when
-asked and never as part of reconciliation.
+asked and never as part of reconciliation; the index behind `get` is built on
+the first lookup, so a snapshot that is only rendered never pays for one.
 
 ### 9.7 Diagnostics
 
@@ -673,7 +683,12 @@ Its delivery contract is weaker than the failure stream's, deliberately:
 `diagnostics` is cumulative counters plus the current lifecycle census. Unlike
 events they are always maintained, being integer increments on paths already
 walked, and they are what a health endpoint or the §15 "reconsider when"
-trigger actually wants. Two readings subtract to give a rate.
+trigger actually wants. Every counter is monotone, so two readings subtract to
+give a rate — which is why the selector counts are read from the evaluator
+under the serialization rather than copied at commit time: evaluation happens
+outside it, and a copy taken there can be published out of order by two
+concurrent commits. They count evaluation performed, including for a commit
+later rejected as invalid; `commits` counts only commits that published.
 
 ### 9.8 Supervision
 
@@ -767,15 +782,32 @@ still replaces the lifetime; desire is still, and only, the keys the selectors
 produce. Observation cannot start or stop anything.
 
 A Definition is state-independent (§4.4), so it names a shape rather than the
-application's state type; a Binding that declared no projection for a family
-that needs one is a `MissingObservation` binding error at `Reconciler.make`
-(§4.3). Projections coalesce to the latest exactly as desire does (§7.3,
+application's state type. The three ways to get the declaration wrong are all
+settled at `Reconciler.make` rather than left to fail inside a startup Effect:
+a `start` marked `Reconciler.requiresObservation` on a family that does not
+declare `observes` is `ObservationRequired`; a Binding with no projection for
+a family that needs one is `MissingObservation`; a projection for a family
+that observes nothing is `UnexpectedObservation` (§4.3). The type system
+catches the shape of a projection that *is* supplied, and cannot catch the
+other two: with no `observes` there is nothing for the observed type to be
+inferred from, and the observation parameter's type collapses to `never`,
+which every argument type satisfies. Nor is the arity of `start` a witness —
+a `start` may declare a second parameter it ignores, and a two-parameter
+helper reused as `start` is a valid family — which is why the first of the
+three is a declaration by the function's own author rather than something
+inferred about it. Projections coalesce to the latest exactly as desire does (§7.3,
 §11) and are compared with `Equal.equals`, so a rebuilt state object with an
 equivalent projection is not news. An obsolete generation is never updated.
 
 `Reconciler.nested` is the three lines that fall out of it: a lifetime whose
 `start` creates a Controller of its own in its own Scope and commits the
-projection to it. It buys **modularity of the Definition** — a feature ships
+projection to it. Its first commit is made inline, so a child Definition or
+Binding that cannot accept the initial projection fails *startup* — visibly, as
+a Failed lifetime. A later projection that the child's own selectors reject is
+an application bug of the class §13.11 calls a defect: it is fatal to the
+forwarding loop, and it is logged explicitly, because the host lifetime stays
+Running — its own resources are healthy — while its child stops following the
+parent's state, and no query can say so. It buys **modularity of the Definition** — a feature ships
 its own families, Binding and state shape, and an application mounts the whole
 thing under an owner. The child stops when its host stops, by the same
 ownership closure that governs every other resource a lifetime holds (§11),
@@ -797,6 +829,7 @@ concern, so recovery is ordinary `catchTag` / `catchTags`:
 ```text
 DefinitionError = ForeignOwner | OwnershipCycle | ForeignRequirement
                 | CapabilityCycle | AmbiguousProvider | UnresolvableProvider
+                | ObservationRequired
 
 BindingError    = ForeignHandle | MissingBinding | MissingObservation
                 | UnexpectedObservation | DuplicateBinding
@@ -1096,9 +1129,10 @@ than hidden. *Evidence:* §9.10, `test/nested.test.ts`.
   across a sequence of commits, and forgets owners that went away
   (`incremental.test.ts`);
 - observed state reaches a running lifetime without replacing it, coalesces to
-  the latest, never reaches an obsolete generation, and is required of a
-  Binding that declared it; a nested Reconciler reconciles on its parent's
-  commits and dies with its host (`nested.test.ts`);
+  the latest, and never reaches an obsolete generation; all three ways to
+  misdeclare it are rejected at `make`; a nested Reconciler reconciles on its
+  parent's commits, dies with its host, and treats a commit that loses the
+  teardown race as teardown rather than as a fault (`nested.test.ts`);
 - ordinary Effect stays ordinary inside `start`: transient retry schedules and
   Layer building work unchanged (`effectNative.test.ts`).
 

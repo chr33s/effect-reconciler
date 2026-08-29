@@ -7,10 +7,12 @@
  * contradict anything else in it).
  */
 import { describe, expect, it } from "@effect/vitest"
-import { Deferred, Effect, Option } from "effect"
+import { Context, Deferred, Effect, Latch, Option } from "effect"
 import * as Reconciler from "../src/Reconciler.js"
+import * as Replacement from "../src/Replacement.js"
 import type { Snapshot } from "../src/Snapshot.js"
-import { idle, StartupFailed, statusTag } from "./util.js"
+import { SessionService } from "./fixtures.js"
+import { eventually, idle, StartupFailed, statusTag } from "./util.js"
 
 /** The snapshot as `family:key` → status tag, which is what an assertion
  * about the shape of the world actually wants to read. */
@@ -51,6 +53,77 @@ const bind = (Def: ReturnType<typeof makeTree>) =>
   }))
 
 describe("snapshot", () => {
+  it.live("§9.6 — two generations of one lifetime are told apart, and `get` names the current one", () =>
+    Effect.gen(function* () {
+      // Under `Replacement.overlap()` a retired generation drains beside the
+      // one replacing it. They share a family, a key and an owner path, so a
+      // `LifetimeRef` cannot tell them apart — which is exactly what a
+      // consumer building a tree has to do before it can place their children.
+      const gate = yield* Latch.make(false)
+      const opened: Array<string> = []
+      const Def = Reconciler.define((define) => {
+        const Session = define.one("Session", {
+          start: (id: string) => Effect.succeed(Context.make(SessionService, { userId: id }))
+        })
+        const Doc = define.many("Doc", {
+          requires: { session: Session },
+          replacement: Replacement.overlap(),
+          start: (uri: string) =>
+            Effect.andThen(
+              Effect.sync(() => opened.push(uri)),
+              Effect.addFinalizer(() => gate.await)
+            )
+        })
+        const Analyzer = define.one("Analyzer", {
+          owner: Doc,
+          replacement: Replacement.overlap(),
+          start: (_: null) => Effect.void
+        })
+        return { Session, Doc, Analyzer }
+      })
+      const controller = yield* Reconciler.make(
+        Def.bind<{ readonly session: string }>((b) => ({
+          session: b.one(Def.Session, (m) => Option.some(m.session)),
+          docs: b.many(Def.Doc, () => ["a.ts"]),
+          analyzer: b.one(Def.Analyzer, () => Option.some(null))
+        }))
+      )
+      const docRef = Reconciler.ref(Def.Doc, "a.ts", null)
+
+      yield* controller.commit({ session: "s1" })
+      yield* idle(controller)
+
+      // Replacing the provider retires the document, whose finalizer is wedged
+      // — so both generations are live at once.
+      yield* controller.commit({ session: "s2" })
+      // The original is wedged in its finalizer, so once the replacement has
+      // started both generations are live at once.
+      yield* eventually(() => opened.length === 2, "the replacement started")
+      const snapshot = yield* controller.snapshot
+      const docs = snapshot.lifetimes.filter((e) => e.lifetime.family.name === "Doc")
+
+      yield* gate.open
+
+      expect(docs.length).toBe(2)
+      // One reference, two generations, distinct tokens.
+      expect(docs[0]!.lifetime).toEqual(docs[1]!.lifetime)
+      expect(docs[0]!.generation).not.toBe(docs[1]!.generation)
+      expect(docs.map((e) => e.status._tag).sort()).toEqual(["Running", "Stopping"])
+      // `Doc` is a root family, so both generations are roots.
+      expect(docs.map((e) => e.owner)).toEqual([null, null])
+      // And each analyzer names the exact document generation that owns it —
+      // not merely its owner's identity, which both documents share.
+      const analyzers = snapshot.lifetimes.filter((e) => e.lifetime.family.name === "Analyzer")
+      expect(analyzers.length).toBe(2)
+      expect(new Set(analyzers.map((e) => e.owner)).size).toBe(2)
+      for (const analyzer of analyzers) {
+        expect(docs.some((doc) => doc.generation === analyzer.owner)).toBe(true)
+      }
+      // `get` answers as `status` does: the generation currently holding the
+      // identity, never the one draining out of it.
+      expect(Option.getOrNull(snapshot.get(docRef))?._tag).toBe("Running")
+    }))
+
   it.live("§9.6 — reports every generation, owners before children", () =>
     Effect.gen(function* () {
       const Def = makeTree(null)

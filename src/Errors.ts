@@ -51,6 +51,30 @@ export class UnresolvableProvider extends Data.TaggedError("UnresolvableProvider
   readonly provider: AnyHandle
 }> {}
 
+/**
+ * A family's `start` declared that it reads projected state, but the family
+ * did not declare `observes`, so there would be nothing to hand it.
+ *
+ * The declaration is `Reconciler.requiresObservation`, and it has to be a
+ * declaration because nothing else decides it. The type system cannot: with
+ * no `observes` there is nothing for the observed type to be inferred from,
+ * the parameter's type collapses to `never`, and `never` satisfies every
+ * annotation a `start` could give it. Nor can the function's arity: a `start`
+ * is free to declare a second parameter it ignores — a two-parameter helper
+ * reused as `start` is a perfectly good family — and arity is blind to rest
+ * and defaulted parameters in the other direction. Settling it here, on what
+ * the function's own author said, is what keeps the mistake from surfacing as
+ * a `TypeError` inside a startup Effect that names neither the family nor the
+ * declaration it is missing.
+ *
+ * `Reconciler.nested` is the common way to reach it: it marks its own `start`,
+ * so a nested Reconciler always needs `observes: Reconciler.observed<SubState>()`
+ * beside it.
+ */
+export class ObservationRequired extends Data.TaggedError("ObservationRequired")<{
+  readonly family: AnyHandle
+}> {}
+
 export type DefinitionError =
   | ForeignOwner
   | OwnershipCycle
@@ -58,6 +82,7 @@ export type DefinitionError =
   | CapabilityCycle
   | AmbiguousProvider
   | UnresolvableProvider
+  | ObservationRequired
 
 // -----------------------------------------------------------------------------
 // Binding errors — the Binding does not match the Definition

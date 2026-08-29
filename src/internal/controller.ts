@@ -104,8 +104,11 @@ const resolveProvider = (
  * provider instances are current. Retires everything that is no longer valid
  * and returns those generations in the order they were retired.
  *
- * `seeds` are generations retired outside a reconcile pass (`Controller.retry`)
- * whose subtree has therefore not been cascaded yet.
+ * `seeds` are generations retired outside a reconcile pass (`Controller.retry`
+ * and the supervision timer) whose subtree has therefore not been cascaded
+ * yet. They enter the walk directly rather than through `cascade`, so
+ * `onRetired` is never called for one — they are already retired, and they
+ * reported that where it was decided.
  */
 const invalidate = (
   live: LiveState,
@@ -196,6 +199,17 @@ const admissible = (
   }
   return { ownerLive, providers }
 }
+
+/**
+ * The source of physical generation identities.
+ *
+ * Process-wide rather than per-Controller, so two Controllers can never mint
+ * the same token and a consumer holding entries from both — a panel showing a
+ * parent and its nested child, say — cannot confuse one generation for
+ * another. It is never persisted, compared across processes, or exposed as a
+ * number.
+ */
+let nextGeneration = 0
 
 // -----------------------------------------------------------------------------
 // Controller
@@ -310,8 +324,6 @@ export const makeController = <State>(
       const counters = {
         commits: 0,
         passes: 0,
-        selectorEvaluations: 0,
-        selectorEvaluationsSkipped: 0,
         admitted: 0,
         started: 0,
         startupFailures: 0,
@@ -362,84 +374,91 @@ export const makeController = <State>(
         exit: Exit.Exit<unknown, unknown>
       ): Effect.Effect<void> =>
         serialized(
-          Effect.suspend((): Effect.Effect<void> => {
-            // Late completion of an obsolete or superseded startup never
-            // publishes capabilities or regains authority: both leave the
-            // `starting` state.
-            if (!open || inst.status !== "starting") return Effect.void
-            if (Exit.isSuccess(exit)) {
-              concludeStartup(live, inst, "running")
-              counters.started++
-              emit(() => ({ _tag: "Started", lifetime: semanticRef(compiled, inst) }))
-              inst.providedContext = Context.isContext(exit.value)
-                ? (exit.value as Context.Context<never>)
-                : Context.empty()
-              // Fold the environment this instance's children inherit exactly
-              // once, here, instead of re-walking the ancestor chain at every
-              // admission below it.
-              inst.childContext = Context.merge(
-                inst.owner === null ? rootContext : inst.owner.childContext,
-                inst.providedContext
-              )
-              // Running answers the question a backoff was asking, so whatever
-              // it had counted up to is no longer about anything.
-              onStarted(inst.ident)
-              return wakeUp
-            }
-            // Startup failure is a normal runtime condition: partial resources
-            // finalize, the failed generation blocks its slot until desire
-            // changes (no automatic retry in v0). External interruption always
-            // marks the instance obsolete (or closes the controller) first, so
-            // an interrupted exit reaching this point means the start Effect
-            // interrupted itself — treated as failure, not left wedged.
-            concludeStartup(live, inst, "failed")
-            inst.failure = exit.cause
-            counters.startupFailures++
-            emit(() => ({
-              _tag: "StartupFailed",
-              lifetime: semanticRef(compiled, inst),
-              cause: exit.cause
-            }))
-            // Only a failure whose semantic desire is still current is an
-            // application-visible failure. Desire can have been withdrawn
-            // between admission and this completion, before the reconcile pass
-            // that will obsolete this generation has even run.
-            const stillDesired = MutableHashMap.has(desired.byIdent, inst.ident)
-            return pipe(
-              stillDesired
-                ? PubSub.publish(failureLog, {
-                  lifetime: semanticRef(compiled, inst),
-                  cause: exit.cause
-                })
-                : Effect.void,
-              Effect.andThen(
-                pipe(
-                  closeInstance(inst, exit),
-                  // Cleaning up a failed startup ends a transition like any
-                  // other, and convergence is only ever observed at the end of
-                  // a pass, so it wakes the loop.
-                  Effect.ensuring(wakeUp),
-                  Effect.forkIn(rootScope, { uninterruptible: true }),
-                  Effect.asVoid
+          // Masked for the same reason `commit` and `retry` are: everything
+          // below is one bookkeeping transition, and the failure branch in
+          // particular claims a generation's `closing` deferred while building
+          // its close. An interruption between that claim and the fork would
+          // leave a generation permanently unsettled.
+          Effect.uninterruptible(
+            Effect.suspend((): Effect.Effect<void> => {
+              // Late completion of an obsolete or superseded startup never
+              // publishes capabilities or regains authority: both leave the
+              // `starting` state.
+              if (!open || inst.status !== "starting") return Effect.void
+              if (Exit.isSuccess(exit)) {
+                concludeStartup(live, inst, "running")
+                counters.started++
+                emit(() => ({ _tag: "Started", lifetime: semanticRef(compiled, inst) }))
+                inst.providedContext = Context.isContext(exit.value)
+                  ? (exit.value as Context.Context<never>)
+                  : Context.empty()
+                // Fold the environment this instance's children inherit exactly
+                // once, here, instead of re-walking the ancestor chain at every
+                // admission below it.
+                inst.childContext = Context.merge(
+                  inst.owner === null ? rootContext : inst.owner.childContext,
+                  inst.providedContext
                 )
-              ),
-              // The generation is Failed *now*. Waking only when its partial
-              // resources finish finalizing would make `changes` — and so any
-              // observer built on it — wait on a finalizer that has nothing to
-              // do with the transition it is reporting, and never arrive at
-              // all behind one that blocks.
-              Effect.andThen(wakeUp),
-              // A policy only ever supervises a failure the application can
-              // still see: desire withdrawn mid-startup means the generation
-              // is on its way out, and restarting it would resurrect exactly
-              // what §6.5 says a late completion must not.
-              Effect.andThen(
+                // Running answers the question a backoff was asking, so whatever
+                // it had counted up to is no longer about anything.
+                onStarted(inst.ident)
+                return wakeUp
+              }
+              // Startup failure is a normal runtime condition: partial resources
+              // finalize, the failed generation blocks its slot until desire
+              // changes (no automatic retry in v0). External interruption always
+              // marks the instance obsolete (or closes the controller) first, so
+              // an interrupted exit reaching this point means the start Effect
+              // interrupted itself — treated as failure, not left wedged.
+              concludeStartup(live, inst, "failed")
+              inst.failure = exit.cause
+              counters.startupFailures++
+              emit(() => ({
+                _tag: "StartupFailed",
+                lifetime: semanticRef(compiled, inst),
+                cause: exit.cause
+              }))
+              // Only a failure whose semantic desire is still current is an
+              // application-visible failure. Desire can have been withdrawn
+              // between admission and this completion, before the reconcile pass
+              // that will obsolete this generation has even run.
+              const stillDesired = MutableHashMap.has(desired.byIdent, inst.ident)
+              return pipe(
                 stillDesired
-                  ? onFailedStartup(inst, compiled.families[inst.familyId]!)
-                  : Effect.void
+                  ? PubSub.publish(failureLog, {
+                    lifetime: semanticRef(compiled, inst),
+                    cause: exit.cause
+                  })
+                  : Effect.void,
+                Effect.andThen(
+                  pipe(
+                    closeInstance(inst, exit),
+                    // Cleaning up a failed startup ends a transition like any
+                    // other, and convergence is only ever observed at the end of
+                    // a pass, so it wakes the loop.
+                    Effect.ensuring(wakeUp),
+                    Effect.forkIn(rootScope, { uninterruptible: true }),
+                    Effect.asVoid
+                  )
+                ),
+                // The generation is Failed *now*. Waking only when its partial
+                // resources finish finalizing would make `changes` — and so any
+                // observer built on it — wait on a finalizer that has nothing to
+                // do with the transition it is reporting, and never arrive at
+                // all behind one that blocks.
+                Effect.andThen(wakeUp),
+                // A policy only ever supervises a failure the application can
+                // still see: desire withdrawn mid-startup means the generation
+                // is on its way out, and restarting it would resurrect exactly
+                // what §6.5 says a late completion must not.
+                Effect.andThen(
+                  stillDesired
+                    ? onFailedStartup(inst, compiled.families[inst.familyId]!)
+                    : Effect.void
+                )
               )
-            )
-          })
+            })
+          )
         )
 
       const startInstance = (
@@ -451,6 +470,7 @@ export const makeController = <State>(
           const parentScope = ownerLive === null ? rootScope : ownerLive.scope
           const instScope = yield* Scope.fork(parentScope, "sequential")
           const inst: LiveInstance = {
+            generation: nextGeneration++,
             familyId: family.id,
             key: node.key,
             ident: node.ident,
@@ -551,19 +571,19 @@ export const makeController = <State>(
       // ---------------------------------------------------------------------
 
       /**
-       * The backoff in progress for one semantic identity. `step` is the
-       * schedule's own driver, so "how long until the next attempt" is the
-       * schedule's business and never this module's; `fiber` is the sleep
-       * currently waiting on it.
+       * The backoff in progress for one semantic identity: the schedule's own
+       * driver, so "how long until the next attempt" is the schedule's
+       * business and never this module's.
        *
-       * State is keyed by semantic identity rather than by generation on
-       * purpose: the whole point of a backoff is that it counts *across*
-       * generations of the same lifetime, which is exactly the thing physical
-       * identity does not survive.
+       * Keyed by semantic identity rather than by generation on purpose: the
+       * whole point of a backoff is that it counts *across* generations of
+       * the same lifetime, which is exactly what physical identity does not
+       * survive. One entry per identity is also all that can exist — an
+       * identity has at most one current generation, so at most one failed
+       * one, so at most one sleep in flight.
        */
       interface Supervisor {
         readonly step: (input: unknown) => Pull.Pull<unknown, never, unknown, never>
-        fiber: Fiber.Fiber<unknown, unknown> | null
       }
       const supervisors = MutableHashMap.empty<Ident, Supervisor>()
 
@@ -607,12 +627,12 @@ export const makeController = <State>(
           let held: Supervisor
           if (existing === undefined) {
             const step = yield* Schedule.toStepWithSleep(policy.schedule)
-            held = { step: step as Supervisor["step"], fiber: null }
+            held = { step: step as Supervisor["step"] }
             MutableHashMap.set(supervisors, inst.ident, held)
           } else {
             held = existing
           }
-          const fiber = yield* pipe(
+          yield* pipe(
             // The sleep is the schedule's; `Done` is the schedule saying it
             // has no further attempt to offer, which is an ending, not a
             // failure. The generation simply stays Failed.
@@ -621,7 +641,6 @@ export const makeController = <State>(
                 serialized(
                   Effect.uninterruptible(
                     Effect.suspend(() => {
-                      held.fiber = null
                       if (!open) return Effect.void
                       if (currentInstance(live, inst.ident) !== inst) return Effect.void
                       if (inst.status !== "failed") return Effect.void
@@ -635,14 +654,11 @@ export const makeController = <State>(
                   )
                 ),
               onFailure: () => Effect.void,
-              onDone: () =>
-                Effect.sync(() => {
-                  held.fiber = null
-                })
+              onDone: () => Effect.void
             }),
-            Effect.forkIn(rootScope)
+            Effect.forkIn(rootScope),
+            Effect.asVoid
           )
-          held.fiber = fiber
         })
       }
 
@@ -670,17 +686,19 @@ export const makeController = <State>(
       const reconcilePass: Effect.Effect<void> = Effect.gen(function* () {
         if (!open) return
 
-        // Retirements decided outside a pass already reported themselves, so
-        // the walk must not report them twice; it reports only what it decides.
-        const outOfBand = new Set(retiredOutOfBand)
+        // Retirements decided outside a pass already reported themselves, and
+        // the walk cannot report them a second time: a seed is retired — so
+        // `stopping` — before it is queued here, and `invalidate` both enters
+        // seeds directly into its walk rather than through `cascade` and skips
+        // every already-obsolete generation. So `onRetired` only ever names a
+        // generation this pass has just decided about, which is exactly what
+        // `noteRetirement` wants to hear.
         const newlyObsolete = invalidate(
           live,
           desired,
           desiredRevision,
           retiredOutOfBand,
-          (inst, reason) => {
-            if (!outOfBand.has(inst)) noteRetirement(inst, reason)
-          }
+          noteRetirement
         )
         retiredOutOfBand.length = 0
         const newlySet = new Set(newlyObsolete)
@@ -789,6 +807,16 @@ export const makeController = <State>(
        */
       const commit = (state: State): Effect.Effect<void, CommitError> =>
         Effect.suspend(() => {
+          // A closed Controller can only ever answer `ControllerClosed`, so
+          // evaluating the Binding first would be an O(N) selector sweep whose
+          // result is discarded — and one that still moves `memory.evaluated`,
+          // which `diagnostics` reports. `open` is only ever set false, so
+          // reading it outside the mutex can be stale in one direction: it may
+          // still say open for a controller closing right now. That is not a
+          // linearization change, because it is not the deciding read — the
+          // authoritative check is still the one inside the publication
+          // region below.
+          if (!open) return Effect.fail(new ControllerClosed())
           // Pure, against this one immutable state value, outside the critical
           // section and outside any mask.
           // Evaluated outside the critical section, against one immutable
@@ -797,8 +825,6 @@ export const makeController = <State>(
           // the same mutex the publication below takes: two commits can queue
           // for publication, but they cannot evaluate at the same time.
           const snapshot = evaluate(compiled, entries, state, memory)
-          const evaluated = memory.evaluated
-          const skipped = memory.skipped
           return serialized(
             // [atomic publication region]
             Effect.uninterruptible(
@@ -808,8 +834,6 @@ export const makeController = <State>(
                 desired = snapshot.success
                 desiredRevision++
                 counters.commits++
-                counters.selectorEvaluations = evaluated
-                counters.selectorEvaluationsSkipped = skipped
                 emit(() => ({ _tag: "Committed", desired: desired.topo.length }))
                 return wakeUp
               })
@@ -869,19 +893,65 @@ export const makeController = <State>(
        */
       const snapshot: Effect.Effect<Snapshot> = serialized(
         Effect.sync((): Snapshot => {
-          const byIdent = MutableHashMap.empty<Ident, LifetimeStatus>()
-          const withDepth: Array<{ readonly entry: LifetimeEntry; readonly depth: number }> = []
+          const withDepth: Array<{
+            readonly entry: LifetimeEntry
+            readonly ident: Ident
+            readonly depth: number
+          }> = []
           for (const inst of live.all) {
-            const status = statusOf(inst)
-            MutableHashMap.set(byIdent, inst.ident, status)
             let depth = 0
             for (let owner = inst.owner; owner !== null; owner = owner.owner) depth++
-            withDepth.push({ entry: { lifetime: semanticRef(compiled, inst), status }, depth })
+            withDepth.push({
+              entry: {
+                lifetime: semanticRef(compiled, inst),
+                status: statusOf(inst),
+                generation: inst.generation as LifetimeEntry["generation"],
+                owner: inst.owner === null
+                  ? null
+                  : (inst.owner.generation as LifetimeEntry["generation"])
+              },
+              ident: inst.ident,
+              depth
+            })
           }
           withDepth.sort((a, b) => a.depth - b.depth)
+          // Split, so the sort's wrapper records are garbage the moment this
+          // returns: what the snapshot goes on holding is these two arrays and
+          // nothing else. `idents` is positionally aligned with `lifetimes`,
+          // and holds the instances' own identity objects rather than fresh
+          // ones, so it costs a pointer per generation.
+          const lifetimes = withDepth.map((d) => d.entry)
+          const idents = withDepth.map((d) => d.ident)
+
+          // Built on the first lookup, not here. A snapshot taken to render a
+          // tree — the common case, and the one `Snapshot`'s doc comment
+          // promises a cost for — never asks for it, and a UI holding the
+          // previous snapshot to diff against would otherwise be holding two
+          // full hash indexes rather than two arrays.
+          let index: MutableHashMap.MutableHashMap<Ident, LifetimeStatus> | undefined
           return {
-            lifetimes: withDepth.map((d) => d.entry),
-            get: (ref) => MutableHashMap.get(byIdent, identOf(compiled, ref))
+            lifetimes,
+            get: (ref) => {
+              // First, so a reference from another Definition is refused even
+              // when the index would have been built anyway.
+              const ident = identOf(compiled, ref)
+              if (index === undefined) {
+                const built = MutableHashMap.empty<Ident, LifetimeStatus>()
+                for (let i = 0; i < lifetimes.length; i++) {
+                  const entry = lifetimes[i]!
+                  const at = idents[i]!
+                  // `status` answers with the generation currently holding an
+                  // identity and only falls back to one that is draining, so
+                  // this must too: a current generation wins its identity
+                  // however `all` happened to be ordered.
+                  if (entry.status._tag !== "Stopping" || !MutableHashMap.has(built, at)) {
+                    MutableHashMap.set(built, at, entry.status)
+                  }
+                }
+                index = built
+              }
+              return MutableHashMap.get(index, ident)
+            }
           }
         })
       )
@@ -917,6 +987,14 @@ export const makeController = <State>(
           return {
             lifetimes: { starting, running, failed, stopping, total: live.all.size },
             ...counters,
+            // Read from the memory itself rather than copied at commit time.
+            // Evaluation happens outside the mutex, so a copy taken there can
+            // be published out of order by two concurrent commits and hand a
+            // reader a *negative* rate between two samples. Read here, under
+            // the mutex, they only ever increase — which is what "cumulative
+            // and monotone" has to mean to be worth subtracting.
+            selectorEvaluations: memory.evaluated,
+            selectorEvaluationsSkipped: memory.skipped,
             settled: quiescent()
           }
         })

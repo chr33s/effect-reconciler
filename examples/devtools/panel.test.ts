@@ -8,8 +8,9 @@
  * — checked against the text they would read.
  */
 import { describe, expect, it } from "@effect/vitest"
-import { Context, Effect, Option } from "effect"
+import { Context, Effect, Latch, Option } from "effect"
 import * as Reconciler from "../../src/Reconciler.js"
+import * as Replacement from "../../src/Replacement.js"
 import { eventually, idle, StartupFailed } from "../../test/util.js"
 import * as Panel from "./panel.js"
 
@@ -96,6 +97,133 @@ describe("devtools panel", () => {
       expect(replaced).toContain("retire · Doc:a.ts (provider)")
       expect(replaced).toContain("retire · Analyzer:null (owner)")
       expect(replaced).toContain("Settings:2  Running")
+    }))
+
+  it.live("keeps two same-named lifetimes under different owners apart", () =>
+    Effect.gen(function* () {
+      // `Doc:shared.ts` exists under two sessions. A tree indexed by
+      // `family:key` merges them into one node and draws both analyzers under
+      // it — a panel that quietly reports a topology the runtime does not
+      // have. Identity is the whole owner path, so the index has to be too.
+      const Def = Reconciler.define((define) => {
+        const Session = define.many("Session", { start: (_id: string) => Effect.void })
+        const Doc = define.many("Doc", { owner: Session, start: (_uri: string) => Effect.void })
+        return { Session, Doc }
+      })
+      const controller = yield* Reconciler.make(
+        Def.bind<{ readonly sessions: ReadonlyArray<string> }>((b) => ({
+          sessions: b.many(Def.Session, (m) => m.sessions),
+          docs: b.many(Def.Doc, () => ["shared.ts"])
+        }))
+      )
+      const panel = yield* Panel.make(controller)
+
+      yield* controller.commit({ sessions: ["s1", "s2"] })
+      yield* idle(controller)
+      yield* eventually(() => panel.render().includes("Doc:shared.ts"), "the first paint")
+      yield* panel.refresh
+
+      const tree = panel.render().split("\n\nrecent")[0]!
+      // One document under each session, not two under one and none under the
+      // other.
+      expect(tree.match(/Session:s1/g)?.length).toBe(1)
+      expect(tree.match(/Session:s2/g)?.length).toBe(1)
+      expect(tree.match(/Doc:shared\.ts/g)?.length).toBe(2)
+      const lines = tree.split("\n").filter((l) => l.includes("Session:") || l.includes("Doc:"))
+      expect(lines.map((l) => l.trimStart().startsWith("└─"))).toEqual([false, true, false, true])
+    }))
+
+  it.live("keeps two generations of one lifetime apart", () =>
+    Effect.gen(function* () {
+      // Under `Replacement.overlap()` a retired generation drains beside the
+      // one replacing it, so `Doc:a.ts` is two entries in one snapshot — same
+      // family, same key, same owner path, different generations. Anything
+      // that indexes children by the owner's *reference* cannot tell them
+      // apart, so it files both analyzers under both documents and draws four
+      // where there are two, each document showing the other's child.
+      const gate = yield* Latch.make(false)
+      const Def = Reconciler.define((define) => {
+        const Settings = define.one("Settings", {
+          start: (revision: number) => Effect.succeed(Context.make(Config, { revision }))
+        })
+        const Doc = define.many("Doc", {
+          requires: { settings: Settings },
+          replacement: Replacement.overlap(),
+          start: (_uri: string) =>
+            Effect.addFinalizer(() => gate.await)
+        })
+        const Analyzer = define.one("Analyzer", {
+          owner: Doc,
+          replacement: Replacement.overlap(),
+          start: (_: null) => Effect.void
+        })
+        return { Settings, Doc, Analyzer }
+      })
+      const controller = yield* Reconciler.make(
+        Def.bind<Model>((b) => ({
+          settings: b.one(Def.Settings, (m) => Option.some(m.revision)),
+          docs: b.many(Def.Doc, (m) => m.docs),
+          analyzer: b.one(Def.Analyzer, () => Option.some(null))
+        }))
+      )
+      const panel = yield* Panel.make(controller)
+
+      yield* controller.commit({ revision: 1, docs: ["a.ts"] })
+      yield* eventually(() => panel.render().includes("Analyzer:null"), "the first paint")
+
+      // Replacing the provider retires the document, whose finalizer is wedged
+      // on the gate — so the replacement starts while the original is still
+      // draining, and both are in the snapshot at once.
+      yield* controller.commit({ revision: 2, docs: ["a.ts"] })
+      yield* eventually(
+        () => panel.render().includes("Doc:a.ts  Stopping"),
+        "the retired generation to appear beside its replacement"
+      )
+      yield* panel.refresh
+      const tree = panel.render().split("\n\nrecent")[0]!
+
+      yield* gate.open
+
+      expect(tree.match(/Doc:a\.ts/g)?.length).toBe(2)
+      // Two analyzers for two documents. Four is the bug: every child drawn
+      // under every generation of its owner.
+      expect(tree.match(/Analyzer:null/g)?.length).toBe(2)
+      // And each analyzer sits under exactly one document, in the status its
+      // own generation is in.
+      const lines = tree.split("\n").filter((l) => /Doc:|Analyzer:/.test(l))
+      expect(lines.length).toBe(4)
+      expect(lines[0]).toContain("Doc:a.ts")
+      expect(lines[1]?.trimStart().startsWith("└─")).toBe(true)
+      expect(lines[2]).toContain("Doc:a.ts")
+      expect(lines[3]?.trimStart().startsWith("└─")).toBe(true)
+    }))
+
+  it.live("two models of an unchanged runtime compare equal", () =>
+    Effect.gen(function* () {
+      const { binding } = app()
+      const controller = yield* Reconciler.make(binding)
+      const panel = yield* Panel.make(controller)
+
+      yield* controller.commit({ revision: 1, docs: ["a.ts"] })
+      yield* idle(controller)
+      yield* eventually(() => panel.render().includes("Doc:a.ts"), "the first paint")
+
+      // Every `snapshot` allocates a fresh value, so a host that refreshes on
+      // a timer gets a different object each time with nothing different in
+      // it. Comparing by reference makes `same` answer "no" forever and
+      // repaint a terminal that has not changed — the exact work it exists to
+      // avoid.
+      const before = panel.model()
+      yield* panel.refresh
+      const after = panel.model()
+      expect(after.snapshot).not.toBe(before.snapshot)
+      expect(Panel.same(before, after)).toBe(true)
+
+      // And it still says "no" when something actually moved.
+      yield* controller.commit({ revision: 1, docs: ["a.ts", "b.ts"] })
+      yield* idle(controller)
+      yield* eventually(() => panel.render().includes("Doc:b.ts"), "the second paint")
+      expect(Panel.same(before, panel.model())).toBe(false)
     }))
 
   it.live("re-reads only when the runtime says something moved", () =>

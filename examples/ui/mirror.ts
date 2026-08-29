@@ -40,10 +40,11 @@
  * desire is a function of the latest state, which is the same reason the
  * runtime coalesces reconcile passes.
  */
-import { Effect, Equal, Latch, MutableHashMap, Option, Semaphore, Stream } from "effect"
+import { Cause, Effect, Equal, Exit, Latch, MutableHashMap, Option, Semaphore, Stream } from "effect"
 import type { CommitError } from "../../src/Errors.js"
 import type { LifetimeRef } from "../../src/LifetimeRef.js"
 import type { Controller } from "../../src/Reconciler.js"
+import type { Snapshot } from "../../src/Snapshot.js"
 import type { LifetimeStatus } from "../../src/Status.js"
 
 export interface MirrorOptions {
@@ -54,6 +55,16 @@ export interface MirrorOptions {
    * the host's error reporting instead of dying inside a fiber.
    */
   readonly onCommitError?: (error: CommitError) => void
+  /**
+   * A defect raised while reading the Controller — in practice a
+   * `ForeignLifetimeRef`, from a component holding a reference built against
+   * a different Definition. It is a programming error, not a runtime
+   * condition, but it must not take the mirror's work loop with it: one bad
+   * reference would otherwise freeze every lifetime on screen at its last
+   * reading, silently. The default rethrows on a fresh task, so it reaches
+   * the host's error reporting.
+   */
+  readonly onDefect?: (cause: Cause.Cause<unknown>) => void
 }
 
 /**
@@ -92,6 +103,29 @@ interface Entry {
   readonly listeners: Set<() => void>
 }
 
+/**
+ * One entry's reading, or `undefined` if the reference could not name
+ * anything here.
+ *
+ * `Snapshot.get` throws `ForeignLifetimeRef` synchronously for a reference
+ * built against another Definition — it is a plain function, so the defect
+ * lands in the caller's stack rather than an Effect's error channel. Caught
+ * per entry rather than per flush, so one component's bad reference costs
+ * that component its reading and no other component theirs.
+ */
+const readStatus = (
+  snapshot: Snapshot,
+  ref: LifetimeRef,
+  onDefect: (cause: Cause.Cause<unknown>) => void
+): { readonly status: Option.Option<LifetimeStatus> } | undefined => {
+  try {
+    return { status: snapshot.get(ref) }
+  } catch (error) {
+    onDefect(Cause.die(error))
+    return undefined
+  }
+}
+
 export const make = <State>(
   controller: Controller<State>,
   options: MirrorOptions = {}
@@ -101,6 +135,12 @@ export const make = <State>(
       ((error: CommitError) => {
         setTimeout(() => {
           throw error
+        })
+      })
+    const onDefect = options.onDefect ??
+      ((cause: Cause.Cause<unknown>) => {
+        setTimeout(() => {
+          throw Cause.squash(cause)
         })
       })
 
@@ -134,15 +174,43 @@ export const make = <State>(
         if (committed._tag === "Failure") onCommitError(committed.failure)
       }
       for (const ref of retries) {
-        yield* Effect.ignore(controller.retry(ref))
+        // `exit`, not `ignore`. A reference built from a handle belonging to
+        // another Definition raises `ForeignLifetimeRef` as a *defect*, which
+        // `Effect.ignore` does not catch — it would kill this fiber, and every
+        // lifetime on screen would freeze at its last reading with nothing to
+        // say why. A bad reference is one component's bug; it must not be the
+        // whole mirror's.
+        const outcome = yield* Effect.exit(controller.retry(ref))
+        if (Exit.isFailure(outcome) && Cause.hasDies(outcome.cause)) onDefect(outcome.cause)
+        // A `ControllerClosed` failure is teardown, not a fault, and is the
+        // one thing `Effect.ignore` was right to swallow.
       }
+
+      // One coherent reading of the whole tree, not N separate `status` calls.
+      // The runtime can move between any two of those, so a mirror built on
+      // them can hand a component a child that is Running under an owner that
+      // has already stopped — which is the incoherence `Controller.snapshot`
+      // exists to rule out. It is also one acquisition of the controller's
+      // mutex per flush instead of one per watched lifetime.
+      const outcome = yield* Effect.exit(controller.snapshot)
+      if (Exit.isFailure(outcome)) {
+        if (Cause.hasDies(outcome.cause)) onDefect(outcome.cause)
+        return
+      }
+      const snapshot = outcome.value
 
       // Snapshot the keys: a component may unwatch while this pass is reading,
       // and refreshing a lifetime nobody watches any more is merely wasted.
       for (const ref of [...MutableHashMap.keys(entries)]) {
         const entry = Option.getOrUndefined(MutableHashMap.get(entries, ref))
         if (entry === undefined) continue
-        const next = yield* controller.status(ref)
+        // `get` throws synchronously for a reference from another Definition,
+        // for the same reason `status` raises a defect for one. Caught per
+        // entry, so one component's bad reference costs that component its
+        // reading and no one else theirs.
+        const read = readStatus(snapshot, ref, onDefect)
+        if (read === undefined) continue
+        const next = read.status
         if (Equal.equals(entry.status, next)) continue
         entry.status = next
         notify(entry)

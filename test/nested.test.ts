@@ -10,7 +10,7 @@
  * only worth having if it inherits.
  */
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Option, Ref, Stream, SubscriptionRef } from "effect"
+import { Effect, Logger, Option, Ref, Stream, SubscriptionRef } from "effect"
 import * as Reconciler from "../src/Reconciler.js"
 import { eventually, idle, quietFor, statusTag } from "./util.js"
 
@@ -80,6 +80,58 @@ describe("observed state", () => {
       yield* controller.commit({ key: "b", value: 3 })
       yield* eventually(() => latest() === "b=3", "the replacement's projection")
       expect(starts).toEqual(["a", "b"])
+    }))
+
+  it.live("§9.10 — a start that takes observed state must declare it", () =>
+    Effect.gen(function* () {
+      const Inner = Reconciler.define((define) => ({
+        Doc: define.many("Doc", { start: (_uri: string) => Effect.void })
+      }))
+      const innerBinding = Inner.bind<Inner>((b) => ({ docs: b.many(Inner.Doc, (m) => m.docs) }))
+      const Outer = Reconciler.define((define) => ({
+        // `nested` takes the observation parameter by construction, so it
+        // always needs `observes` beside it — and the type system cannot say
+        // so, because with no `observes` that parameter's type is `never`,
+        // which every argument type satisfies.
+        Host: define.one("Host", { start: Reconciler.nested<string>()(innerBinding) })
+      }))
+      const result = yield* Effect.result(
+        Reconciler.make(
+          Outer.bind<{ readonly host: string }>((b) => ({
+            host: b.one(Outer.Host, (m) => Option.some(m.host))
+          }))
+        )
+      )
+      // Named, at `make`, about a named family — not a `TypeError` about
+      // reading a property of undefined, from inside a startup Effect.
+      expect(result._tag).toBe("Failure")
+      if (result._tag === "Failure") {
+        expect(result.failure._tag).toBe("ObservationRequired")
+      }
+    }))
+
+  it.live("§9.10 — a `start` that merely takes a second parameter is not a mistake", () =>
+    Effect.gen(function* () {
+      const started: Array<string> = []
+      // A two-parameter helper reused as `start`. It observes nothing, ignores
+      // the second argument, and is exactly what a function-arity check would
+      // condemn — while the type system accepts it, because with no `observes`
+      // the parameter's type is `never` and `never` satisfies every annotation.
+      const helper = (uri: string, _unused: unknown) =>
+        Effect.sync(() => {
+          started.push(uri)
+        })
+      const Def = Reconciler.define((define) => ({
+        Doc: define.many("Doc", { start: helper })
+      }))
+      const controller = yield* Reconciler.make(
+        Def.bind<{ readonly docs: ReadonlyArray<string> }>((b) => ({
+          docs: b.many(Def.Doc, (m) => m.docs)
+        }))
+      )
+
+      yield* controller.commit({ docs: ["a.ts"] })
+      yield* eventually(() => started.includes("a.ts"), "the family started")
     }))
 
   it.live("§9.10 — a projection for a family that observes nothing is rejected", () =>
@@ -203,6 +255,129 @@ describe("nested reconcilers", () => {
       expect(yield* statusTag(controller, Reconciler.ref(Outer.Workspace, "w1", null)))
         .toBe("Running")
     }))
+
+  it.live("§9.10 — tearing down a nested host is not a fault", () => {
+    const logged: Array<string> = []
+    const opened: Array<string> = []
+    return Effect.gen(function* () {
+      const { binding } = makeNested(opened)
+      const controller = yield* Reconciler.make(binding)
+
+      yield* controller.commit({
+        workspace: Option.some("w1"),
+        docsByWorkspace: { w1: ["a.ts"] },
+        noise: 0
+      })
+      yield* idle(controller)
+      yield* quietFor()
+
+      // Teardown with a projection still in flight, which is the shape the
+      // forwarding loop's `ControllerClosed` guard is there for: the child
+      // Controller is shut down by the closing of the host's Scope, and the
+      // fiber forwarding projections into it is interrupted by the same close.
+      // A commit that lost that race must not surface as a defect.
+      //
+      // The ordering is the runtime's, so this cannot force the race — the
+      // assertion is that teardown is silent and complete however it resolves,
+      // which is what would break if a commit landing in the window ever
+      // became a fault.
+      yield* controller.commit({
+        workspace: Option.some("w1"),
+        docsByWorkspace: { w1: ["b.ts"] },
+        noise: 0
+      })
+      const exit = yield* Effect.exit(controller.shutdown)
+
+      expect(exit._tag).toBe("Success")
+      expect(logged).toEqual([])
+      // Everything the child had open is closed, by ownership.
+      expect(opened.filter((e) => !e.startsWith("-")).sort())
+        .toEqual(opened.filter((e) => e.startsWith("-")).map((e) => e.slice(1)).sort())
+    }).pipe(
+      Effect.provideService(
+        Logger.CurrentLoggers,
+        new Set([Logger.make(({ message }) => {
+          logged.push(Array.isArray(message) ? message.map(String).join(" ") : String(message))
+        })])
+      )
+    )
+  })
+
+  it.live("§9.10 — a projection the child cannot accept stops the loop and says so", () => {
+    const logged: Array<string> = []
+    const opened: Array<string> = []
+    return Effect.gen(function* () {
+      const Inner = Reconciler.define((define) => ({
+        Doc: define.many("Doc", {
+          start: (uri: string) =>
+            Effect.acquireRelease(
+              Effect.sync(() => opened.push(uri)),
+              () => Effect.sync(() => opened.push(`-${uri}`))
+            )
+        })
+      }))
+      const innerBinding = Inner.bind<Inner>((b) => ({ docs: b.many(Inner.Doc, (m) => m.docs) }))
+      const Outer = Reconciler.define((define) => ({
+        Host: define.one("Host", {
+          observes: Reconciler.observed<Inner>(),
+          start: Reconciler.nested<string>()(innerBinding)
+        })
+      }))
+      const controller = yield* Reconciler.make(
+        Outer.bind<Outer>((b) => ({
+          host: b.one(Outer.Host, (m) => m.workspace, {
+            observe: (m) => ({
+              docs: m.docsByWorkspace[Option.getOrElse(m.workspace, () => "")] ?? []
+            })
+          })
+        }))
+      )
+      const hostRef = Reconciler.ref(Outer.Host, "w1", null)
+
+      yield* controller.commit({
+        workspace: Option.some("w1"),
+        docsByWorkspace: { w1: ["a.ts"] },
+        noise: 0
+      })
+      yield* eventually(() => opened.includes("a.ts"), "the child is following")
+
+      // A projection the child's Binding cannot turn into a desired state — a
+      // duplicate key, rejected at the child's own `commit`. The host's
+      // resources are all healthy, so `status` has nothing to report about it,
+      // which is exactly why the loop says it out loud instead.
+      yield* controller.commit({
+        workspace: Option.some("w1"),
+        docsByWorkspace: { w1: ["b.ts", "b.ts"] },
+        noise: 0
+      })
+      yield* eventually(
+        () => logged.some((line) => line.includes("stopped following its parent")),
+        "the loop reported that it stopped"
+      )
+
+      // And it really stopped: a later, perfectly valid projection reaches the
+      // child not at all. The host stays Running, because nothing it owns
+      // failed — the trade the log line exists to make visible.
+      yield* controller.commit({
+        workspace: Option.some("w1"),
+        docsByWorkspace: { w1: ["c.ts"] },
+        noise: 0
+      })
+      yield* idle(controller)
+      yield* quietFor()
+      expect(opened).toEqual(["a.ts"])
+      expect(yield* statusTag(controller, hostRef)).toBe("Running")
+    }).pipe(
+      // The loop dies on purpose here, so its own log line is the assertion
+      // and the fiber failure behind it is not console noise.
+      Effect.provideService(
+        Logger.CurrentLoggers,
+        new Set([Logger.make(({ message }) => {
+          logged.push(Array.isArray(message) ? message.map(String).join(" ") : String(message))
+        })])
+      )
+    )
+  })
 
   it.live("§9.10 — the child dies with its host, by ownership and not by rule", () =>
     Effect.gen(function* () {
