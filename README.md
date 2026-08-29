@@ -412,7 +412,7 @@ tests — and if it is not removing those for you, it is not paying for itself.
 
 ## Requirements
 
-`effect` v4 (currently `4.0.0-rc.x`) as a peer dependency, and Node 20 or
+`effect` v4 (currently `4.0.0-rc.x`) as a peer dependency, and Node 24 LTS or
 later.
 
 ## Development
@@ -439,7 +439,7 @@ it, but it is unreachable through `exports`: only the modules named there are
 the `0.x` surface.
 
 CI runs check, lint, the conformance suite, the build and `verify-package` on
-Node LTS and current for every push and pull request. `verify-package` is the
+the minimum supported Node LTS (24) and Node current for every push and pull request. `verify-package` is the
 one step nothing above it can stand in for: it packs the tarball, installs it
 into a throwaway project with `effect` supplied from outside, and drives the
 package through its public entry points — so an `exports` entry pointing at a

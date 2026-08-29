@@ -11,7 +11,7 @@ import { describe, expect, it } from "@effect/vitest"
 import { Context, Effect, Option, Queue, Stream, type Scope } from "effect"
 import type { ReconcileEvent } from "../src/Diagnostics.js"
 import * as Reconciler from "../src/Reconciler.js"
-import { idle, StartupFailed } from "./util.js"
+import { hooks, idle, StartupFailed } from "./util.js"
 
 class Settings extends Context.Service<Settings, { readonly revision: number }>()(
   "test/DiagSettings"
@@ -165,6 +165,27 @@ describe("event stream", () => {
       expect(yield* drain(events)).toEqual([])
       // Config, the document, and the analyzer under it.
       expect((yield* controller.snapshot).lifetimes.length).toBe(3)
+    }))
+
+  it.live("§9.7 — constructs events only while a subscription is active", () =>
+    Effect.gen(function* () {
+      const { binding } = makeApp()
+      const controller = yield* Reconciler.make(binding)
+
+      // Obtaining the stream is not subscribing to it.
+      const events = controller.events
+      expect(yield* hooks(controller).eventSubscribers).toBe(0)
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* Stream.toQueue(events, { capacity: 16 })
+          yield* Effect.sleep(30)
+          expect(yield* hooks(controller).eventSubscribers).toBe(1)
+        })
+      )
+
+      // Ending the subscription turns construction back off.
+      expect(yield* hooks(controller).eventSubscribers).toBe(0)
     }))
 })
 

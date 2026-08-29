@@ -115,12 +115,49 @@ export const start = <Model, Message, R>(
     const failed = new Map<string, unknown>()
     const subscriptions = new Map<string, { dependencies: unknown; fiber: Fiber.Fiber<void> }>()
 
-    const track = <A, E>(effect: Effect.Effect<A, E, R>): Effect.Effect<void> =>
+    // Registered before any worker fiber, so the Scope's reverse finalizer
+    // order first interrupts/awaits those workers and only then drains the
+    // resources that remain installed. Resource Scopes are otherwise
+    // standalone `Scope.make()` values and would survive the session.
+    yield* Effect.addFinalizer(() => {
+      const remaining = [...resources.entries()]
+      resources.clear()
+      return Effect.provide(
+        Effect.forEach(
+          remaining,
+          ([name, state]) => {
+            const entry = app.managedResources?.[name]
+            const holder = resourceValues.get(name)
+            return Effect.gen(function* () {
+              if (holder !== undefined) yield* Ref.set(holder[1], Option.none())
+              if (entry !== undefined) {
+                yield* Effect.ensuring(
+                  entry.release(state.value),
+                  Scope.close(state.scope, Exit.void)
+                )
+              } else {
+                yield* Scope.close(state.scope, Exit.void)
+              }
+            })
+          },
+          { discard: true }
+        ),
+        context
+      )
+    })
+
+    const track = <A, E>(
+      effect: Effect.Effect<A, E, R>,
+      options?: { readonly uninterruptible?: boolean }
+    ): Effect.Effect<void> =>
       Effect.gen(function* () {
         inFlight++
+        const operation = options?.uninterruptible === true
+          ? Effect.uninterruptible(Effect.orDie(effect))
+          : Effect.interruptible(Effect.orDie(effect))
         yield* Effect.forkIn(
           Effect.ensuring(
-            Effect.provide(Effect.interruptible(Effect.orDie(effect)), context),
+            Effect.provide(operation, context),
             Effect.sync(() => {
               inFlight--
             })
@@ -150,7 +187,8 @@ export const start = <Model, Message, R>(
               yield* entry.release(state.value)
               yield* Scope.close(state.scope, Exit.void)
               yield* dispatch(entry.onReleased())
-            }) as Effect.Effect<void, never, R>
+            }) as Effect.Effect<void, never, R>,
+            { uninterruptible: true }
           )
           continue
         }
@@ -169,7 +207,8 @@ export const start = <Model, Message, R>(
               yield* entry.release(state.value)
               yield* Scope.close(state.scope, Exit.void)
               yield* dispatch(entry.onReleased())
-            }) as Effect.Effect<void, never, R>
+            }) as Effect.Effect<void, never, R>,
+            { uninterruptible: true }
           )
         }
 

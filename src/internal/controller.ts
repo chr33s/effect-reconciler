@@ -233,6 +233,8 @@ export interface TestHooks {
    * blocked startup or finalizer), so gate-driven tests await their gates.
    */
   readonly idle: Effect.Effect<void>
+  /** Number of active diagnostic event-stream subscriptions. */
+  readonly eventSubscribers: Effect.Effect<number>
 }
 
 export interface ControllerInternal<State> {
@@ -317,10 +319,22 @@ export const makeController = <State>(
 
       // Building a `LifetimeRef` walks the owner chain and allocates one
       // object per level, so a Controller nobody is watching must not do it.
-      // Flipped by the first subscription to `events` and never back: a
-      // subscriber that comes and goes would otherwise leave the next one
-      // watching a channel that had quietly switched itself off.
-      let eventsObserved = false
+      // Count active stream subscriptions rather than property accesses: a
+      // consumer that only obtains the stream, or whose subscription has
+      // ended, must not leave event construction enabled forever.
+      let eventSubscribers = 0
+      const events = Stream.unwrap(
+        Effect.acquireRelease(
+          Effect.sync(() => {
+            eventSubscribers++
+            return Stream.fromPubSub(eventLog)
+          }),
+          () =>
+            Effect.sync(() => {
+              eventSubscribers--
+            })
+        )
+      )
       const counters = {
         commits: 0,
         passes: 0,
@@ -333,7 +347,7 @@ export const makeController = <State>(
       }
       /** Publish a diagnostic event, building it only if anyone is listening. */
       const emit = (event: () => ReconcileEvent): void => {
-        if (!eventsObserved) return
+        if (eventSubscribers === 0) return
         PubSub.publishUnsafe(eventLog, event())
       }
 
@@ -1121,23 +1135,17 @@ export const makeController = <State>(
         commit,
         changes: Stream.fromPubSub(changeLog),
         failures: Stream.fromPubSub(failureLog),
-        // Reaching for the stream is what turns event construction on — at
-        // property access, not at first pull, so the gate is open before the
-        // caller has had a chance to do anything worth reporting. Delivery
-        // still begins where the subscription does: running the stream
-        // establishes that, and whatever happened in between was not seen.
-        // That is the channel being lossy at its start as well as under
-        // overflow, which is what keeps it a diagnostic and not a record.
-        get events(): Stream.Stream<ReconcileEvent> {
-          eventsObserved = true
-          return Stream.fromPubSub(eventLog)
-        },
+        events,
         status,
         snapshot,
         diagnostics,
         retry,
         shutdown,
-        [TestHooksId]: { holding: serialized, idle }
+        [TestHooksId]: {
+          holding: serialized,
+          idle,
+          eventSubscribers: Effect.sync(() => eventSubscribers)
+        }
       }
     })
   )

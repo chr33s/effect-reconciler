@@ -16,7 +16,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [lts/*, current]
+        # Pin the minimum promised runtime rather than letting `lts/*` move
+        # forward and silently stop testing it.
+        node: [24, current]
     steps:
       - uses: actions/checkout@v4
 

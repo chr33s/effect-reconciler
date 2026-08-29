@@ -841,7 +841,7 @@ CommitError     = ControllerClosed | InvalidDesiredState
 `InvalidDesiredState` carries a discriminated reason:
 
 ```text
-DuplicateDesiredKey | InvalidSelectorResult | SelectorFailed | UnstableKey
+DuplicateDesiredKey | InvalidSelectorResult | SelectorFailed
 ```
 
 Message formatting is presentation, not structure. States made impossible by

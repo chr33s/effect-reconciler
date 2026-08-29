@@ -114,6 +114,19 @@ describe("managed-resource-layer migration", () => {
           ])
         }))
 
+      it.live("tears down a live engine when the session Scope closes", () =>
+        Effect.gen(function* () {
+          resetEngines()
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const app = yield* subject.start()
+              yield* app.startEngine
+              expect(engineLog).toEqual(["boot:engine-1"])
+            })
+          )
+          expect(engineLog).toEqual(["boot:engine-1", "teardown:engine-1"])
+        }))
+
       it.live("surfaces a boot failure and recovers from it", () =>
         Effect.gen(function* () {
           resetEngines()

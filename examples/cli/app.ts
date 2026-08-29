@@ -81,24 +81,31 @@ export class WatchFailed extends Data.TaggedError("WatchFailed")<{
 const errorCode = (error: unknown): string =>
   (error as NodeJS.ErrnoException | undefined)?.code ?? String(error)
 
+const close = (server: http.Server): Effect.Effect<void> =>
+  Effect.callback<void>((resume) => {
+    server.closeAllConnections()
+    server.close(() => resume(Effect.void))
+  })
+
 const listen = (root: string, port: number): Effect.Effect<http.Server, ListenFailed> =>
-  Effect.callback<http.Server, ListenFailed>((resume) => {
+  Effect.callback<http.Server, ListenFailed>((resume, signal) => {
     const server = http.createServer((_request, response) => {
       response.end(`devctl is serving ${root}\n`)
     })
     const onError = (error: Error) =>
       resume(Effect.fail(new ListenFailed({ port, reason: errorCode(error) })))
     server.once("error", onError)
-    server.listen(port, "127.0.0.1", () => {
+    server.listen({ port, host: "127.0.0.1", signal }, () => {
       server.removeListener("error", onError)
       resume(Effect.succeed(server))
     })
-  })
-
-const close = (server: http.Server): Effect.Effect<void> =>
-  Effect.callback<void>((resume) => {
-    server.closeAllConnections()
-    server.close(() => resume(Effect.void))
+    // If the lifetime is retired before `listening`, acquireRelease never
+    // receives the server and therefore cannot install its normal finalizer.
+    // The callback cleanup owns that narrow window.
+    return Effect.andThen(
+      Effect.sync(() => server.removeListener("error", onError)),
+      close(server)
+    )
   })
 
 // --- The process tree, declared once -----------------------------------------
