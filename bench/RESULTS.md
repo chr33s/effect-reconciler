@@ -188,3 +188,59 @@ every watched lifetime's status every 250 ms forever, converged or not.
 `examples/ui/mirror.test.ts` now asserts zero reads across a 400 ms idle
 window. For an observer, the change is not a percentage — it is the difference
 between work proportional to time and work proportional to transitions.
+
+## Incremental bindings: a win on unchanged data, a loss on changed data
+
+`deps` (`docs/spec.md` §9.9) lets a Binding declare what a selector reads, so
+the runtime can skip the call — and reuse the semantic identities it produced
+last time — when those inputs are unchanged. The A/B below runs the same
+topology and the same scenarios at 10,000 documents, twice: once as the full
+sweep, once with `deps` on both the `Document` selector and the per-document
+`Diagnostics` selector.
+
+| scenario | commit p50 | commit p95 | converge p50 | selector evals |
+| :--- | ---: | ---: | ---: | ---: |
+| A equivalent commit, full sweep | 7.84 | 12.54 | 17.21 | 10005 |
+| A equivalent commit, incremental | **6.92** | **7.67** | **1.73** | **4** |
+| B one document changed, full sweep | **8.25** | **15.56** | 22.26 | 10005 |
+| B one document changed, incremental | 23.81 | 29.06 | **5.52** | 6 |
+
+Read the two rows that matter together:
+
+- **Unchanged data is about three times cheaper end to end** — 25 ms of commit
+  plus convergence becomes 8.6 ms. Most of that is not the skipped selectors;
+  it is the reused identities. An identity caches its hash, so a pass over
+  reused ones does cached reads where a pass over fresh ones walks the key and
+  the whole owner chain. That is why convergence improves tenfold while commit
+  improves barely at all.
+- **Changed data is about three times more expensive at the commit boundary.**
+  A miss pays for the `deps` call and a memo probe *on top of* the work it
+  could not avoid, and the probe is the expensive half: it is keyed by the
+  owner's semantic identity, which on a miss is a freshly built object whose
+  hash has to be computed from scratch.
+
+Two consequences worth stating plainly, because they are not what "add a
+memo" usually implies:
+
+1. **Declare `deps` where the dependency genuinely changes rarely relative to
+   commits.** On data that changes on most commits it is a pessimization, and
+   the full sweep — which is what you get by writing nothing — is faster.
+2. **Incrementality wants the whole owner chain.** With `deps` on only the
+   per-document selector and not on `Document` itself, the equivalent-commit
+   case was *worse* than the full sweep (19.8 ms commit against 8.8 ms):
+   every memo probe was keyed by a document identity that had just been
+   rebuilt, so every probe paid a full structural hash. Adding `deps` one
+   level up turned a 2.2× regression into a 3× improvement. A memo whose key
+   is expensive to compute is not a memo.
+
+The pruning of memo entries for owners that have gone away is conditional for
+the same reason: as an unconditional per-commit sweep it allocated an array of
+ten thousand entries and probed each one, and cost more than the selectors the
+memo existed to skip. It now runs only when the memo holds more owners than
+the commit visited, which is the only way a stale entry can exist.
+
+Everything here is one run of the seven-sample method rather than the
+three-run median used for the main table, and the p95 column at this size is
+noisy in both directions. The selector-evaluation and churn columns are exact,
+and churn is identical between the two — which is the assertion the benchmark
+actually makes, and the reason the timings are worth reading at all.

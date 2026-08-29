@@ -2,7 +2,7 @@
  * Phase 1 type-misuse checks. This file is compiled by `tsc --noEmit`; every
  * `@ts-expect-error` line asserts that the API rejects the misuse statically.
  */
-import { Context, Data, Effect, Option } from "effect"
+import { Context, Data, Effect, Option, SubscriptionRef } from "effect"
 import type { LifetimeRef } from "../src/LifetimeRef.js"
 import * as Reconciler from "../src/Reconciler.js"
 
@@ -220,3 +220,64 @@ Reconciler.ref(Keyed.Structural, new WorkspaceKey({ organizationId: "a", workspa
 
 // @ts-expect-error — wrong key type for this family
 Reconciler.ref(Keyed.Primitive, "1", null)
+
+// -----------------------------------------------------------------------------
+// Observed state (spec §9.10)
+// -----------------------------------------------------------------------------
+
+interface Projected {
+  readonly docs: ReadonlyArray<string>
+}
+
+const Observing = Reconciler.define((define) => ({
+  Host: define.one("Host", {
+    observes: Reconciler.observed<Projected>(),
+    // The second parameter is typed from `observes`, not annotated here.
+    start: (_key: string, state) => Effect.map(SubscriptionRef.get(state), (p) => p.docs.length)
+  }),
+  Plain: define.one("Plain", {
+    start: (_key: string) => Effect.void
+  })
+}))
+
+interface ObservingState {
+  readonly host: string
+  readonly docs: ReadonlyArray<string>
+}
+
+// A family that observes: the projection is supplied and typed.
+Observing.bind<ObservingState>((bind) => ({
+  Host: bind.one(Observing.Host, (s) => Option.some(s.host), {
+    observe: (s) => ({ docs: s.docs })
+  }),
+  Plain: bind.one(Observing.Plain, (s) => Option.some(s.host))
+}))
+
+Observing.bind<ObservingState>((bind) => ({
+  Host: bind.one(Observing.Host, (s) => Option.some(s.host), {
+    // @ts-expect-error — the projection must produce the declared shape
+    observe: (s) => ({ documents: s.docs })
+  }),
+  Plain: bind.one(Observing.Plain, (s) => Option.some(s.host))
+}))
+
+// The converse — a projection for a family that observes nothing — is the one
+// case the types cannot catch: with no `observes` there is nothing for `S` to
+// be inferred from, so `observe` is accepted here and rejected at
+// `Reconciler.make` as `UnexpectedObservation` instead. Asserted at runtime in
+// `test/nested.test.ts`, because that is where it is actually decided.
+Observing.bind<ObservingState>((bind) => ({
+  Host: bind.one(Observing.Host, (s) => Option.some(s.host), {
+    observe: (s) => ({ docs: s.docs })
+  }),
+  Plain: bind.one(Observing.Plain, (s) => Option.some(s.host), { observe: (s) => s.docs })
+}))
+
+// Incremental bindings compose with everything, and need no observation.
+Observing.bind<ObservingState>((bind) => ({
+  Host: bind.one(Observing.Host, (s) => Option.some(s.host), {
+    deps: (s) => s.host,
+    observe: (s) => ({ docs: s.docs })
+  }),
+  Plain: bind.one(Observing.Plain, (s) => Option.some(s.host), { deps: (s) => s.host })
+}))

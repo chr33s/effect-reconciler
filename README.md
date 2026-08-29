@@ -24,13 +24,13 @@ would give you a second runtime identity, and services published by a lifetime
 would not be the services your code asks for.
 
 > **Experimental `0.x`.** The kernel and its semantics are specified in
-> [`docs/spec.md`](docs/spec.md) and held to the conformance suite (spec §14),
-> and `Definition`, `Binding`, `commit`, `status` and `shutdown` are the parts
-> meant to be built on. **`retry`, `failures`, `changes` and everything about
-> observability and diagnostics are unstable** and may change shape within
-> `0.x`. Deliberately absent, and not planned for `0.x`: the snapshot API,
-> DevTools, supervision and retry policy DSLs, incremental selectors and
-> nested Reconcilers (spec §16.1).
+> [`docs/spec.md`](docs/spec.md) and held to the conformance suite (spec §14).
+> `Definition`, `Binding`, `commit`, `status`, `snapshot` and `shutdown` are
+> the parts meant to be built on. **`retry`, `failures`, `changes`, `events`,
+> `diagnostics`, supervision policies, incremental `deps` and observed state
+> are unstable** and may change shape within `0.x` — they are specified,
+> conformance-tested and measured, but they have not had production mileage
+> (spec §16.1).
 
 ## The 30-second model
 
@@ -41,6 +41,11 @@ Three things, and nothing else to learn:
 | **Definition** | the static architecture — which families exist, who owns whom, what requires what | once, at startup |
 | **Binding** | pure selectors from *your* state to the keys each family should have | on every commit |
 | **Controller** | commit state, read status, retry a failure, shut down | for the life of the app |
+
+Observation splits the same way, and the split is load-bearing: **queries are
+authoritative and cannot be missed** (`status`, `snapshot`), **streams explain
+and may be missed** (`failures`, `changes`, `events`). Derive application state
+from the first; read the second to understand what happened.
 
 ```text
 commit(state) ─▶ selectors ─▶ desired keys ─▶ reconcile ─▶ live Effect Scopes
@@ -57,7 +62,7 @@ drive by hand is a lifecycle that cannot drift from your state.
 
 ```ts
 import { Context, Effect, Option } from "effect"
-import { Reconciler, Replacement } from "effect-reconciler"
+import { Reconciler, Replacement, Supervision } from "effect-reconciler"
 
 // 1. Define the static architecture once (state-independent). The semantic key
 //    type is inferred from `start`; identity is Effect's Equal/Hash.
@@ -150,7 +155,35 @@ yield* controller.retry(ref)
 // Nothing is named, so there is nothing to trust — you re-read what you care
 // about. A converged runtime is silent, which is what a timer cannot be.
 yield* Stream.runForEach(controller.changes, () => refreshWhateverIsOnScreen)
+
+// The whole tree at one instant, owners before children. Not N status calls:
+// those interleave with N-1 chances for the runtime to move, and can show a
+// child Running under an owner that has already stopped.
+const snapshot = yield* controller.snapshot
+for (const { lifetime, status } of snapshot.lifetimes) {
+  render(lifetime.family.name, lifetime.key, status._tag)
+}
 ```
+
+For understanding the runtime rather than driving it, there is a diagnostic
+half — lossy, never authoritative, and built only while something is watching:
+
+```ts
+// Why, which is the one thing `status` cannot tell you. The application
+// changed one settings revision; three lifetimes moved, for three reasons
+// none of which is written anywhere in the application.
+yield* Stream.runForEach(controller.events, (event) => {
+  // Retired · Settings:1     (desire)    — the application changed this
+  // Retired · Document:a.ts  (provider)  — it captured Settings at admission
+  // Retired · Analyzer:null  (owner)     — its owner went, so it went
+  return log(event)
+})
+
+const { lifetimes, commits, passes, startupFailures } = yield* controller.diagnostics
+```
+
+[`examples/devtools`](examples/devtools/README.md) is ~150 lines of assembly
+over those three, and prints a live tree.
 
 Expected failures are tagged data, so recovery is ordinary Effect:
 
@@ -174,6 +207,44 @@ capabilities is a root-environment requirement, and surfaces on
 const controller = Reconciler.make(Bound) // Effect<..., Scope | SettingsService>
 ```
 
+### Policy, incrementality and nesting
+
+Three optional declarations, all off by default, all measured or bounded
+rather than assumed:
+
+```ts
+// Restart a failed *startup* on a schedule — the one case ordinary
+// `Effect.retry` inside `start` cannot reach, because the slot and the key
+// belong to the runtime. Never touches a running lifetime (spec §9.8).
+define.one("Server", {
+  supervision: Supervision.restart(
+    Schedule.exponential("100 millis").pipe(Schedule.upTo({ times: 5 }))
+  ),
+  start: (key: string) => …
+})
+
+// Declare what a selector reads, and it is skipped when that is unchanged.
+// Opt-in because the runtime cannot check the claim, and *not* a free win:
+// ~3x cheaper on unchanged data, ~3x more expensive on data that changes
+// (spec §9.9, bench/RESULTS.md).
+bind.many(Document, (s, owner) => s.docsByWorkspace[owner.key], {
+  deps: (s, owner) => s.docsByWorkspace[owner.key]
+})
+
+// A lifetime that runs a Reconciler of its own, over its own state shape and
+// its own families. It stops when its host stops, by the ownership closure
+// that already exists — there is no second lifecycle (spec §9.10).
+define.one("Workspace", {
+  owner: Session,
+  observes: Reconciler.observed<WorkspaceModel>(),
+  start: Reconciler.nested<string>()(workspaceBinding)
+})
+```
+
+`observes` is also useful on its own: it is the only channel by which a
+*running* lifetime sees state change instead of being replaced by it. A key
+change still replaces the lifetime; observation cannot start or stop anything.
+
 Each design decision, what it rules out, and where its evidence lives are in
 the specification (spec §13).
 
@@ -187,6 +258,9 @@ More complete examples:
 - [`examples/foldkit-migration`](examples/foldkit-migration/README.md) — an
   upstream Foldkit example app migrated onto it, including where that did not
   pay off.
+- [`examples/devtools`](examples/devtools/README.md) — a live tree, counters
+  and a why-column, assembled from `snapshot` + `events` + `diagnostics` and
+  rendered to text so it can be asserted on.
 - [`examples/ui`](examples/ui/README.md) — React, Solid and Lit adapters over
   a shared synchronous mirror of `Controller.status`, driven entirely by
   `changes`. This example is why `changes` exists: it was built against a
@@ -225,6 +299,17 @@ Spec §14 maps each of these to the test file that proves it.
 - change signals report every transition `status` can report — `Starting →
   Running` included — stay silent through an equivalent commit, coalesce, and
   prompt a late or racing subscriber exactly once
+- a snapshot reports every generation owners-first, answers as `status` does,
+  cannot contradict itself mid-transition, and is empty after shutdown
+- events name why each generation was retired and retain nothing for a
+  Controller nobody is watching; counters are maintained regardless
+- supervision is off by default, restarts a failed startup under the same key,
+  stops when its schedule is exhausted, and resets once the lifetime runs
+- an incremental binding skips exactly the selectors whose declared
+  dependencies are unchanged and produces the same desire the full sweep does
+- observed state reaches a running lifetime without replacing it, coalesces to
+  the latest, and never reaches an obsolete generation; a nested Reconciler
+  reconciles on its parent's commits and dies with its host
 
 ## Where it sits next to `RcMap` and `LayerMap`
 
@@ -300,6 +385,14 @@ transition, or stable generation numbers. Depending on any of those is
 depending on an implementation detail.
 
 ## Non-goals
+
+Supervision is the sharpest example of the boundary. A restart policy here
+covers a **startup that failed** and nothing else: a lifetime *is* its Scope,
+so once `start` returns, whatever it forked inside that Scope is its own
+business, and `Effect.retry` inside `start` — next to the code that knows what
+broke — is a better tool than anything this could offer. The one thing an
+application cannot do for itself is retire a generation in a slot the runtime
+owns, under a key the runtime assigned.
 
 This does not replace `Effect`, `Scope`, `Layer`, `Context`, `Fiber`, `Stream`,
 `RcMap` or `LayerMap` — it coordinates them. Effect answers how work executes,

@@ -85,9 +85,35 @@ export class CardinalityMismatch extends Data.TaggedError("CardinalityMismatch")
   readonly used: "one" | "many"
 }> {}
 
+/**
+ * A family declared `observes`, so it needs projected state, and its selector
+ * did not say how to project it. Reported here rather than left to produce a
+ * `SubscriptionRef` of `undefined` at runtime: it is a structural fact about
+ * the Binding, and structural facts are settled once, at `Reconciler.make`.
+ */
+export class MissingObservation extends Data.TaggedError("MissingObservation")<{
+  readonly family: AnyHandle
+}> {}
+
+/**
+ * A selector supplied a projection for a family that does not observe
+ * anything, so nothing would ever have read it.
+ *
+ * The sibling of `MissingObservation`, and reported for the same reason: the
+ * type system can require a projection where one is declared, but it cannot
+ * reliably forbid one where none is — a family that declares no `observes`
+ * leaves nothing for the type of `observe` to be inferred from. Rather than
+ * let the mistake pass silently, the Binding compiler settles it.
+ */
+export class UnexpectedObservation extends Data.TaggedError("UnexpectedObservation")<{
+  readonly family: AnyHandle
+}> {}
+
 export type BindingError =
   | ForeignHandle
   | MissingBinding
+  | MissingObservation
+  | UnexpectedObservation
   | DuplicateBinding
   | CardinalityMismatch
 

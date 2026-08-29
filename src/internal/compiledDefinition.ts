@@ -1,6 +1,7 @@
 import * as Result from "effect/Result"
 import type * as Effect from "effect/Effect"
 import type { LabeledEntry } from "../Binding.js"
+import type { SupervisionPolicy } from "../Supervision.js"
 import type { Binding } from "../Binding.js"
 import {
   asInternal,
@@ -19,7 +20,9 @@ import {
   ForeignOwner,
   ForeignRequirement,
   MissingBinding,
+  MissingObservation,
   OwnershipCycle,
+  UnexpectedObservation,
   UnresolvableProvider,
   type BindingError,
   type DefinitionError
@@ -54,7 +57,11 @@ export interface CompiledFamily {
   readonly chain: ReadonlyArray<number>
   readonly requires: ReadonlyArray<CompiledRequirement>
   readonly replacement: "sequential" | "overlap"
-  readonly start: (key: any) => Effect.Effect<any, any, any>
+  readonly supervision: SupervisionPolicy
+  /** Whether this family observes projected state, so a Binding must project
+   * it and a running generation must be handed it. */
+  readonly observes: boolean
+  readonly start: (key: any, observed: any) => Effect.Effect<any, any, any>
 }
 
 /** Compiled static architecture: ownership tree + capability resolution
@@ -157,6 +164,8 @@ export const compileDefinition = (
       chain,
       requires,
       replacement: handle.replacement,
+      supervision: handle.supervision,
+      observes: handle.observes,
       start: handle.start
     })
   }
@@ -188,8 +197,15 @@ export const compileBinding = <State>(
     entries.set(internal.familyId, entry)
   }
   for (const family of compiled.families) {
-    if (!entries.has(family.id)) {
+    const entry = entries.get(family.id)
+    if (entry === undefined) {
       return Result.fail(new MissingBinding({ family: family.handle }))
+    }
+    if (family.observes && entry.observe === undefined) {
+      return Result.fail(new MissingObservation({ family: family.handle }))
+    }
+    if (!family.observes && entry.observe !== undefined) {
+      return Result.fail(new UnexpectedObservation({ family: family.handle }))
     }
   }
   return Result.succeed(entries)

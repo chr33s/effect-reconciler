@@ -2,6 +2,7 @@ import * as Cause from "effect/Cause"
 import * as Context from "effect/Context"
 import * as Deferred from "effect/Deferred"
 import * as Effect from "effect/Effect"
+import * as Equal from "effect/Equal"
 import * as Exit from "effect/Exit"
 import * as Fiber from "effect/Fiber"
 import { pipe } from "effect/Function"
@@ -9,21 +10,27 @@ import * as Latch from "effect/Latch"
 import * as MutableHashMap from "effect/MutableHashMap"
 import * as Option from "effect/Option"
 import * as PubSub from "effect/PubSub"
+import * as Pull from "effect/Pull"
 import * as Result from "effect/Result"
 import * as Scope from "effect/Scope"
+import * as Schedule from "effect/Schedule"
 import * as Semaphore from "effect/Semaphore"
 import * as Stream from "effect/Stream"
+import * as SubscriptionRef from "effect/SubscriptionRef"
 import type { LabeledEntry } from "../Binding.js"
 import { asInternal, isHandle } from "../Definition.js"
 import { ControllerClosed, ForeignLifetimeRef, type CommitError } from "../Errors.js"
+import type { Diagnostics, ReconcileEvent, RetirementReason } from "../Diagnostics.js"
 import type { LifetimeFailure } from "../Failure.js"
 import type { LifetimeRef } from "../LifetimeRef.js"
+import type { LifetimeEntry, Snapshot } from "../Snapshot.js"
 import type { LifetimeStatus } from "../Status.js"
 import type { Compiled, CompiledFamily, CompiledRequirement } from "./compiledDefinition.js"
 import { makeFinalization } from "./finalization.js"
 import {
   emptySnapshot,
   evaluate,
+  makeIncrementalMemory,
   type DesiredNode,
   type DesiredSnapshot
 } from "./desiredSnapshot.js"
@@ -31,6 +38,7 @@ import { Ident, slotIdent } from "./identity.js"
 import {
   concludeStartup,
   currentInstance,
+  forget,
   isObsolete,
   makeLiveState,
   retire,
@@ -103,13 +111,15 @@ const invalidate = (
   live: LiveState,
   desired: DesiredSnapshot,
   revision: number,
-  seeds: ReadonlyArray<LiveInstance>
+  seeds: ReadonlyArray<LiveInstance>,
+  onRetired: ((inst: LiveInstance, reason: RetirementReason) => void) | undefined
 ): Array<LiveInstance> => {
   const newlyObsolete: Array<LiveInstance> = []
   const pending: Array<LiveInstance> = []
-  const cascade = (inst: LiveInstance): void => {
+  const cascade = (inst: LiveInstance, reason: RetirementReason): void => {
     if (isObsolete(inst)) return
     retire(live, inst)
+    onRetired?.(inst, reason)
     newlyObsolete.push(inst)
     pending.push(inst)
   }
@@ -126,7 +136,7 @@ const invalidate = (
       inst.desiredNode = node
       if (node !== undefined) node.live = inst
     }
-    if (inst.desiredNode === undefined) cascade(inst)
+    if (inst.desiredNode === undefined) cascade(inst, "desire")
   }
   // Invalidity travels down the two edges that carry it — owner to child and
   // provider to dependent — so it is walked from where it starts rather than
@@ -135,8 +145,10 @@ const invalidate = (
   for (const seed of seeds) pending.push(seed)
   while (pending.length > 0) {
     const inst = pending.pop()!
-    for (const child of inst.children) cascade(child)
-    for (const dependent of inst.dependents) cascade(dependent)
+    // The two edges invalidity travels are also the two reasons it can have,
+    // which is why the walk can name them without looking anything up.
+    for (const child of inst.children) cascade(child, "owner")
+    for (const dependent of inst.dependents) cascade(dependent, "provider")
   }
   return newlyObsolete
 }
@@ -213,7 +225,10 @@ export interface ControllerInternal<State> {
   readonly commit: (state: State) => Effect.Effect<void, CommitError>
   readonly changes: Stream.Stream<void>
   readonly failures: Stream.Stream<LifetimeFailure>
+  readonly events: Stream.Stream<ReconcileEvent>
   readonly status: (ref: LifetimeRef) => Effect.Effect<Option.Option<LifetimeStatus>>
+  readonly snapshot: Effect.Effect<Snapshot>
+  readonly diagnostics: Effect.Effect<Diagnostics>
   readonly retry: (ref: LifetimeRef) => Effect.Effect<void, ControllerClosed>
   readonly shutdown: Effect.Effect<void>
   readonly [TestHooksId]: TestHooks
@@ -261,8 +276,16 @@ export const makeController = <State>(
       // transition it could have missed. Replaying a *prompt* costs nothing
       // and reveals nothing — there is no history here to leak.
       const changeLog = yield* PubSub.sliding<void>({ capacity: 1, replay: 1 })
+      // Diagnostics are a firehose by nature, so the buffer is larger and the
+      // loss is still the oldest first. Nothing downstream may depend on
+      // completeness, which is what makes dropping acceptable at all.
+      const eventLog = yield* PubSub.sliding<ReconcileEvent>(512)
 
       const live = makeLiveState()
+      // What incremental bindings remember between commits. Held here because
+      // its whole value is that it outlives one evaluation; a Binding with no
+      // `deps` anywhere never writes to it.
+      const memory = makeIncrementalMemory()
       let open = true
       let desired: DesiredSnapshot = emptySnapshot
       let desiredRevision = 0
@@ -278,6 +301,30 @@ export const makeController = <State>(
       // that leaves them equal moved nothing an observer could see.
       let publishedVersion = 0
 
+      // Building a `LifetimeRef` walks the owner chain and allocates one
+      // object per level, so a Controller nobody is watching must not do it.
+      // Flipped by the first subscription to `events` and never back: a
+      // subscriber that comes and goes would otherwise leave the next one
+      // watching a channel that had quietly switched itself off.
+      let eventsObserved = false
+      const counters = {
+        commits: 0,
+        passes: 0,
+        selectorEvaluations: 0,
+        selectorEvaluationsSkipped: 0,
+        admitted: 0,
+        started: 0,
+        startupFailures: 0,
+        retired: 0,
+        stopped: 0,
+        retries: 0
+      }
+      /** Publish a diagnostic event, building it only if anyone is listening. */
+      const emit = (event: () => ReconcileEvent): void => {
+        if (!eventsObserved) return
+        PubSub.publishUnsafe(eventLog, event())
+      }
+
       // Requesting a pass and losing convergence are the same event, so they
       // are the same synchronous step: no fiber can observe one without the
       // other.
@@ -287,11 +334,28 @@ export const makeController = <State>(
         Latch.openUnsafe(wake)
       })
 
-      const { beginStop, closeInstance } = makeFinalization({ live, mutex, rootScope, wakeUp })
+      const { beginStop, closeInstance } = makeFinalization({
+        live,
+        mutex,
+        rootScope,
+        wakeUp,
+        onStopped: (inst) => {
+          counters.stopped++
+          emit(() => ({ _tag: "Stopped", lifetime: semanticRef(compiled, inst) }))
+        }
+      })
 
       // ---------------------------------------------------------------------
       // Startup
       // ---------------------------------------------------------------------
+
+      // `onStartupDone` runs before the supervision section is defined but
+      // only ever *executes* after the whole closure exists, so the hook is
+      // filled in below rather than hoisted — the alternative is moving a
+      // large block for the sake of one call.
+      let onFailedStartup: (inst: LiveInstance, family: CompiledFamily) => Effect.Effect<void> =
+        () => Effect.void
+      let onStarted: (ident: Ident) => void = () => {}
 
       const onStartupDone = (
         inst: LiveInstance,
@@ -305,6 +369,8 @@ export const makeController = <State>(
             if (!open || inst.status !== "starting") return Effect.void
             if (Exit.isSuccess(exit)) {
               concludeStartup(live, inst, "running")
+              counters.started++
+              emit(() => ({ _tag: "Started", lifetime: semanticRef(compiled, inst) }))
               inst.providedContext = Context.isContext(exit.value)
                 ? (exit.value as Context.Context<never>)
                 : Context.empty()
@@ -315,6 +381,9 @@ export const makeController = <State>(
                 inst.owner === null ? rootContext : inst.owner.childContext,
                 inst.providedContext
               )
+              // Running answers the question a backoff was asking, so whatever
+              // it had counted up to is no longer about anything.
+              onStarted(inst.ident)
               return wakeUp
             }
             // Startup failure is a normal runtime condition: partial resources
@@ -325,6 +394,12 @@ export const makeController = <State>(
             // interrupted itself — treated as failure, not left wedged.
             concludeStartup(live, inst, "failed")
             inst.failure = exit.cause
+            counters.startupFailures++
+            emit(() => ({
+              _tag: "StartupFailed",
+              lifetime: semanticRef(compiled, inst),
+              cause: exit.cause
+            }))
             // Only a failure whose semantic desire is still current is an
             // application-visible failure. Desire can have been withdrawn
             // between admission and this completion, before the reconcile pass
@@ -353,7 +428,16 @@ export const makeController = <State>(
               // observer built on it — wait on a finalizer that has nothing to
               // do with the transition it is reporting, and never arrive at
               // all behind one that blocks.
-              Effect.andThen(wakeUp)
+              Effect.andThen(wakeUp),
+              // A policy only ever supervises a failure the application can
+              // still see: desire withdrawn mid-startup means the generation
+              // is on its way out, and restarting it would resurrect exactly
+              // what §6.5 says a late completion must not.
+              Effect.andThen(
+                stillDesired
+                  ? onFailedStartup(inst, compiled.families[inst.familyId]!)
+                  : Effect.void
+              )
             )
           })
         )
@@ -382,6 +466,7 @@ export const makeController = <State>(
             providedContext: Context.empty(),
             childContext: rootContext,
             failure: null,
+            observed: null,
             closing: null
           }
           node.live = inst
@@ -396,11 +481,21 @@ export const makeController = <State>(
           }
           const startContext = Context.add(ctx, Scope.Scope, instScope)
 
+          // A family that observes projected state gets its own ref, seeded
+          // with the projection that came from the same state value that
+          // decided this generation should exist.
+          if (family.observes) {
+            const ref = yield* SubscriptionRef.make(node.observed)
+            inst.observed = { ref, value: node.observed }
+          }
+
           // Forks are interruptible in Effect 4 however the forking fiber is
           // masked, which is what closing the instance Scope relies on to
           // cancel a startup admitted inside the uninterruptible pass.
           const startFiber = yield* pipe(
-            Effect.suspend(() => family.start(inst.key)) as Effect.Effect<
+            Effect.suspend(() =>
+              family.start(inst.key, inst.observed?.ref as SubscriptionRef.SubscriptionRef<unknown>)
+            ) as Effect.Effect<
               unknown,
               unknown,
               Scope.Scope
@@ -413,16 +508,180 @@ export const makeController = <State>(
             Effect.flatMap((exit) => onStartupDone(inst, exit)),
             Effect.forkIn(rootScope)
           )
+          counters.admitted++
+          emit(() => ({ _tag: "Admitted", lifetime: node.ref }))
         })
+
+      // ---------------------------------------------------------------------
+      // Observation
+      // ---------------------------------------------------------------------
+
+      /**
+       * Hand a current generation the latest projection of the state it
+       * observes, if it changed.
+       *
+       * Compared with `Equal.equals` rather than by reference, for the same
+       * reason an equivalent commit causes no churn (§8.4): a control plane
+       * rebuilds its state object on every keystroke, and a projection that
+       * is structurally what it already was is not news. Without that, a
+       * nested Reconciler would receive — and re-evaluate — a commit per
+       * parent commit, which is exactly the cost this whole design exists to
+       * avoid.
+       *
+       * Only a *current* generation is updated. An obsolete one is on its way
+       * out and must not be told about a world it is no longer part of; a
+       * `starting` one is updated, because a startup that is subscribed to
+       * its ref before this pass would otherwise miss the change and one that
+       * has not read it yet will see the latest value when it does.
+       */
+      const republish = (inst: LiveInstance, node: DesiredNode): Effect.Effect<void> => {
+        const observed = inst.observed
+        if (observed === null) return Effect.void
+        if (Equal.equals(observed.value, node.observed)) return Effect.void
+        observed.value = node.observed
+        return SubscriptionRef.set(observed.ref, node.observed)
+      }
 
       // ---------------------------------------------------------------------
       // Reconcile loop
       // ---------------------------------------------------------------------
 
+      // ---------------------------------------------------------------------
+      // Supervision
+      // ---------------------------------------------------------------------
+
+      /**
+       * The backoff in progress for one semantic identity. `step` is the
+       * schedule's own driver, so "how long until the next attempt" is the
+       * schedule's business and never this module's; `fiber` is the sleep
+       * currently waiting on it.
+       *
+       * State is keyed by semantic identity rather than by generation on
+       * purpose: the whole point of a backoff is that it counts *across*
+       * generations of the same lifetime, which is exactly the thing physical
+       * identity does not survive.
+       */
+      interface Supervisor {
+        readonly step: (input: unknown) => Pull.Pull<unknown, never, unknown, never>
+        fiber: Fiber.Fiber<unknown, unknown> | null
+      }
+      const supervisors = MutableHashMap.empty<Ident, Supervisor>()
+
+      /**
+       * Forget the backoff for an identity. Called whenever the question it
+       * was answering has changed: the lifetime started, its desire went
+       * away, or someone asked for a retry by hand.
+       *
+       * It does not interrupt the sleep in flight, and that is deliberate
+       * rather than lazy. Interrupting awaits the fiber, and a fired timer
+       * queued on the controller's mutex cannot finish while the caller
+       * holding that mutex waits for it — a deadlock reachable from a
+       * startup completing in the same pass that retired its predecessor.
+       * Nothing needs the interruption: the timer re-checks the exact
+       * instance, its status and its desire before doing anything, so an
+       * abandoned sleep wakes into a world where all three say no and exits.
+       * Dropping the entry is the whole reset, because a later failure builds
+       * a fresh `Supervisor` with a fresh schedule.
+       */
+      const resetSupervisor = (ident: Ident): void => {
+        MutableHashMap.remove(supervisors, ident)
+      }
+
+      /**
+       * Retire a failed generation on its family's schedule.
+       *
+       * The fired timer re-checks everything rather than trusting what it
+       * captured: a schedule that has been asleep for thirty seconds is the
+       * last thing that should be allowed to retire whatever happens to be in
+       * the slot when it wakes. Holding the *instance* — not just its
+       * identity — is what makes that check exact.
+       */
+      const superviseFailure = (
+        inst: LiveInstance,
+        family: CompiledFamily
+      ): Effect.Effect<void> => {
+        if (family.supervision._tag !== "Restart") return Effect.void
+        const policy = family.supervision
+        return Effect.gen(function* () {
+          const existing = Option.getOrUndefined(MutableHashMap.get(supervisors, inst.ident))
+          let held: Supervisor
+          if (existing === undefined) {
+            const step = yield* Schedule.toStepWithSleep(policy.schedule)
+            held = { step: step as Supervisor["step"], fiber: null }
+            MutableHashMap.set(supervisors, inst.ident, held)
+          } else {
+            held = existing
+          }
+          const fiber = yield* pipe(
+            // The sleep is the schedule's; `Done` is the schedule saying it
+            // has no further attempt to offer, which is an ending, not a
+            // failure. The generation simply stays Failed.
+            Pull.matchEffect(held.step(void 0), {
+              onSuccess: () =>
+                serialized(
+                  Effect.uninterruptible(
+                    Effect.suspend(() => {
+                      held.fiber = null
+                      if (!open) return Effect.void
+                      if (currentInstance(live, inst.ident) !== inst) return Effect.void
+                      if (inst.status !== "failed") return Effect.void
+                      if (!MutableHashMap.has(desired.byIdent, inst.ident)) return Effect.void
+                      retire(live, inst)
+                      counters.retries++
+                      noteRetirement(inst, "retry")
+                      retiredOutOfBand.push(inst)
+                      return Effect.andThen(beginStop(inst), wakeUp)
+                    })
+                  )
+                ),
+              onFailure: () => Effect.void,
+              onDone: () =>
+                Effect.sync(() => {
+                  held.fiber = null
+                })
+            }),
+            Effect.forkIn(rootScope)
+          )
+          held.fiber = fiber
+        })
+      }
+
+      onFailedStartup = superviseFailure
+      onStarted = resetSupervisor
+
+      /**
+       * Bookkeeping every retirement shares, wherever it was decided.
+       *
+       * A retirement drops the backoff, with one exception that is the whole
+       * point of having one: the retirement a backoff itself performs. Every
+       * other reason means the failed generation is gone for reasons of its
+       * own and whether its successor fails is a fresh question — but a
+       * scheduled restart is the *same* question, asked again, and a schedule
+       * that reset itself on each of its own attempts would never reach its
+       * own limit. `Controller.retry` resets deliberately at its own call
+       * site, because a person asking for an attempt now is a new question.
+       */
+      const noteRetirement = (inst: LiveInstance, reason: RetirementReason): void => {
+        counters.retired++
+        emit(() => ({ _tag: "Retired", lifetime: semanticRef(compiled, inst), reason }))
+        if (reason !== "retry") resetSupervisor(inst.ident)
+      }
+
       const reconcilePass: Effect.Effect<void> = Effect.gen(function* () {
         if (!open) return
 
-        const newlyObsolete = invalidate(live, desired, desiredRevision, retiredOutOfBand)
+        // Retirements decided outside a pass already reported themselves, so
+        // the walk must not report them twice; it reports only what it decides.
+        const outOfBand = new Set(retiredOutOfBand)
+        const newlyObsolete = invalidate(
+          live,
+          desired,
+          desiredRevision,
+          retiredOutOfBand,
+          (inst, reason) => {
+            if (!outOfBand.has(inst)) noteRetirement(inst, reason)
+          }
+        )
         retiredOutOfBand.length = 0
         const newlySet = new Set(newlyObsolete)
         // Subtree roots get their own close (descendants close with them).
@@ -441,7 +700,14 @@ export const makeController = <State>(
           // Already satisfied by a current generation: nothing to admit, and
           // no need to hash anything to find that out.
           const satisfying = node.live
-          if (satisfying !== undefined && !isObsolete(satisfying)) continue
+          if (satisfying !== undefined && !isObsolete(satisfying)) {
+            // The null check is inline rather than inside `republish` so the
+            // overwhelmingly common case — a family that observes nothing —
+            // costs a field read, not an Effect step per node per pass. At ten
+            // thousand lifetimes that difference is the whole sweep.
+            if (satisfying.observed !== null) yield* republish(satisfying, node)
+            continue
+          }
           const family = compiled.families[node.familyId]!
           const admission = admissible(live, desired, family, node)
           if (admission !== undefined) yield* startInstance(node, family, admission)
@@ -475,10 +741,19 @@ export const makeController = <State>(
 
       const onePass = Effect.suspend(() => {
         const covered = wakeVersion
+        const admittedBefore = counters.admitted
+        const retiredBefore = counters.retired
         return Effect.andThen(
           reconcilePass,
           Effect.sync(() => {
             reconciledVersion = covered
+            counters.passes++
+            emit(() => ({
+              _tag: "PassCompleted",
+              admitted: counters.admitted - admittedBefore,
+              retired: counters.retired - retiredBefore,
+              settled: quiescent()
+            }))
             // Under the mutex, after the pass and after every transition it
             // caused, so a subscriber woken by this signal reads state at
             // least as new as the one that caused it.
@@ -516,7 +791,14 @@ export const makeController = <State>(
         Effect.suspend(() => {
           // Pure, against this one immutable state value, outside the critical
           // section and outside any mask.
-          const snapshot = evaluate(compiled, entries, state)
+          // Evaluated outside the critical section, against one immutable
+          // state value — including the memo reads and writes. That is safe
+          // only because `commit` is the sole caller and commits linearize on
+          // the same mutex the publication below takes: two commits can queue
+          // for publication, but they cannot evaluate at the same time.
+          const snapshot = evaluate(compiled, entries, state, memory)
+          const evaluated = memory.evaluated
+          const skipped = memory.skipped
           return serialized(
             // [atomic publication region]
             Effect.uninterruptible(
@@ -525,11 +807,42 @@ export const makeController = <State>(
                 if (Result.isFailure(snapshot)) return Effect.fail(snapshot.failure)
                 desired = snapshot.success
                 desiredRevision++
+                counters.commits++
+                counters.selectorEvaluations = evaluated
+                counters.selectorEvaluationsSkipped = skipped
+                emit(() => ({ _tag: "Committed", desired: desired.topo.length }))
                 return wakeUp
               })
             )
           )
         })
+
+      /** What one generation reports as. The single translation from internal
+       * lifecycle to public vocabulary, so `status` and `snapshot` cannot
+       * drift into two answers for the same generation. */
+      const statusOf = (inst: LiveInstance): LifetimeStatus => {
+        switch (inst.status) {
+          case "starting":
+            return { _tag: "Starting" }
+          case "running":
+            return { _tag: "Running" }
+          case "failed":
+            return { _tag: "Failed", cause: inst.failure ?? Cause.empty }
+          case "stopping":
+            return { _tag: "Stopping" }
+        }
+      }
+
+      /** The generation answering for an identity, current or still draining. */
+      const instanceFor = (ident: Ident): LiveInstance | undefined => {
+        const inst = currentInstance(live, ident)
+        if (inst !== undefined) return inst
+        // A generation that is no longer current but still finalizing is
+        // still something that exists. It has left `currentByIdent`, but it
+        // cannot have left the slot it is draining out of.
+        const cardinality = compiled.families[ident.familyId]!.cardinality
+        return retiringInstance(live, slotIdent(ident.familyId, cardinality, ident), ident)
+      }
 
       /**
        * The authoritative state of one semantic lifetime. Read under the same
@@ -539,30 +852,75 @@ export const makeController = <State>(
       const status = (ref: LifetimeRef): Effect.Effect<Option.Option<LifetimeStatus>> =>
         serialized(
           Effect.sync((): Option.Option<LifetimeStatus> => {
-            const ident = identOf(compiled, ref)
-            const inst = currentInstance(live, ident)
-            if (inst !== undefined) {
-              switch (inst.status) {
-                case "starting":
-                  return Option.some({ _tag: "Starting" })
-                case "running":
-                  return Option.some({ _tag: "Running" })
-                case "failed":
-                  return Option.some({ _tag: "Failed", cause: inst.failure ?? Cause.empty })
-                case "stopping":
-                  return Option.some({ _tag: "Stopping" })
-              }
-            }
-            // A generation that is no longer current but still finalizing is
-            // still something that exists. It has left `currentByIdent`, but
-            // it cannot have left the slot it is draining out of.
-            const cardinality = compiled.families[ident.familyId]!.cardinality
-            const slot = slotIdent(ident.familyId, cardinality, ident)
-            return retiringInstance(live, slot, ident) === undefined
-              ? Option.none()
-              : Option.some({ _tag: "Stopping" })
+            const inst = instanceFor(identOf(compiled, ref))
+            return inst === undefined ? Option.none() : Option.some(statusOf(inst))
           })
         )
+
+      /**
+       * Every generation at one instant, owners before children.
+       *
+       * Taken under the mutex for the reason the whole API exists: N separate
+       * `status` calls interleave with N-1 chances for the runtime to move,
+       * and a tree assembled from them can show a child Running under an
+       * owner that has already stopped. Depth ordering is computed here
+       * rather than trusted from `all`'s insertion order, which admission
+       * happens to produce and nothing guarantees.
+       */
+      const snapshot: Effect.Effect<Snapshot> = serialized(
+        Effect.sync((): Snapshot => {
+          const byIdent = MutableHashMap.empty<Ident, LifetimeStatus>()
+          const withDepth: Array<{ readonly entry: LifetimeEntry; readonly depth: number }> = []
+          for (const inst of live.all) {
+            const status = statusOf(inst)
+            MutableHashMap.set(byIdent, inst.ident, status)
+            let depth = 0
+            for (let owner = inst.owner; owner !== null; owner = owner.owner) depth++
+            withDepth.push({ entry: { lifetime: semanticRef(compiled, inst), status }, depth })
+          }
+          withDepth.sort((a, b) => a.depth - b.depth)
+          return {
+            lifetimes: withDepth.map((d) => d.entry),
+            get: (ref) => MutableHashMap.get(byIdent, identOf(compiled, ref))
+          }
+        })
+      )
+
+      /**
+       * Cumulative counters plus the current lifecycle census. The counters
+       * are maintained unconditionally — they are integer increments on paths
+       * already walked — but the census is an O(N) walk, so it is done here,
+       * when asked, and never as part of reconciliation.
+       */
+      const diagnostics: Effect.Effect<Diagnostics> = serialized(
+        Effect.sync((): Diagnostics => {
+          let starting = 0
+          let running = 0
+          let failed = 0
+          let stopping = 0
+          for (const inst of live.all) {
+            switch (inst.status) {
+              case "starting":
+                starting++
+                break
+              case "running":
+                running++
+                break
+              case "failed":
+                failed++
+                break
+              case "stopping":
+                stopping++
+                break
+            }
+          }
+          return {
+            lifetimes: { starting, running, failed, stopping, total: live.all.size },
+            ...counters,
+            settled: quiescent()
+          }
+        })
+      )
 
       /**
        * Retire a Failed generation so a fresh one may be admitted under the same
@@ -591,6 +949,12 @@ export const makeController = <State>(
               // policy still governs when the fresh generation may start, and
               // the next pass cascades to whatever depended on this one.
               retire(live, inst)
+              counters.retries++
+              noteRetirement(inst, "retry")
+              // Asked for by hand, so the backoff starts over: a control
+              // plane that offers a Retry button has just been told the
+              // situation changed, whatever the schedule believed.
+              resetSupervisor(ident)
               retiredOutOfBand.push(inst)
               return Effect.andThen(beginStop(inst), wakeUp)
             })
@@ -609,9 +973,35 @@ export const makeController = <State>(
                 open = false
                 desired = emptySnapshot
                 desiredRevision++
+                // Every live generation is obsolete from this moment (§8.6),
+                // and saying so here is what stops `status` and `snapshot`
+                // reporting Running for a lifetime whose Scope is about to be
+                // closed underneath it. The reconcile loop dies with the root
+                // Scope, so no pass will ever do this on their behalf.
+                for (const inst of live.all) {
+                  if (!isObsolete(inst)) {
+                    retire(live, inst)
+                    noteRetirement(inst, "shutdown")
+                  }
+                }
               })
             ),
             Effect.andThen(Scope.close(rootScope, Exit.void)),
+            // The close awaited every instance Scope and every in-flight stop
+            // fiber, so this is a real finalization boundary for all of them
+            // — and the one place the whole live state can be dropped at once
+            // rather than one `beginStop` at a time.
+            Effect.andThen(
+              serialized(
+                Effect.sync(() => {
+                  for (const inst of [...live.all]) {
+                    forget(live, inst)
+                    counters.stopped++
+                    emit(() => ({ _tag: "Stopped", lifetime: semanticRef(compiled, inst) }))
+                  }
+                })
+              )
+            ),
             // Nothing is left to converge on, and no further pass will run —
             // so this is also the last chance to signal whatever the close
             // itself moved. A subscriber that re-reads after it sees the final
@@ -653,7 +1043,20 @@ export const makeController = <State>(
         commit,
         changes: Stream.fromPubSub(changeLog),
         failures: Stream.fromPubSub(failureLog),
+        // Reaching for the stream is what turns event construction on — at
+        // property access, not at first pull, so the gate is open before the
+        // caller has had a chance to do anything worth reporting. Delivery
+        // still begins where the subscription does: running the stream
+        // establishes that, and whatever happened in between was not seen.
+        // That is the channel being lossy at its start as well as under
+        // overflow, which is what keeps it a diagnostic and not a record.
+        get events(): Stream.Stream<ReconcileEvent> {
+          eventsObserved = true
+          return Stream.fromPubSub(eventLog)
+        },
         status,
+        snapshot,
+        diagnostics,
         retry,
         shutdown,
         [TestHooksId]: { holding: serialized, idle }

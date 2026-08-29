@@ -5,6 +5,7 @@ import * as Equal from "effect/Equal"
 import * as MutableHashMap from "effect/MutableHashMap"
 import * as Option from "effect/Option"
 import type * as Scope from "effect/Scope"
+import type * as SubscriptionRef from "effect/SubscriptionRef"
 import type { DesiredNode } from "./desiredSnapshot.js"
 import type { Ident } from "./identity.js"
 
@@ -52,6 +53,13 @@ export interface LiveInstance {
   childContext: Context.Context<never>
   /** Why startup failed, for `status`. Set only in the `failed` state. */
   failure: Cause.Cause<unknown> | null
+  /**
+   * The projected state this generation observes, for families that declared
+   * `observes`; `null` for every other family, which is nearly all of them.
+   * Held so a pass can tell an unchanged projection from a changed one
+   * without asking the ref what it currently contains.
+   */
+  observed: { ref: SubscriptionRef.SubscriptionRef<unknown>; value: unknown } | null
   /**
    * Set when a dedicated close of this instance's Scope is initiated
    * (obsolescence or startup failure) and completed only when that close has

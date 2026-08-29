@@ -37,6 +37,10 @@
       "types": "./dist/Definition.d.ts",
       "default": "./dist/Definition.js"
     },
+    "./Diagnostics": {
+      "types": "./dist/Diagnostics.d.ts",
+      "default": "./dist/Diagnostics.js"
+    },
     "./Errors": {
       "types": "./dist/Errors.d.ts",
       "default": "./dist/Errors.js"
@@ -57,9 +61,17 @@
       "types": "./dist/Replacement.d.ts",
       "default": "./dist/Replacement.js"
     },
+    "./Snapshot": {
+      "types": "./dist/Snapshot.d.ts",
+      "default": "./dist/Snapshot.js"
+    },
     "./Status": {
       "types": "./dist/Status.d.ts",
       "default": "./dist/Status.js"
+    },
+    "./Supervision": {
+      "types": "./dist/Supervision.d.ts",
+      "default": "./dist/Supervision.js"
     },
     "./package.json": "./package.json"
   },

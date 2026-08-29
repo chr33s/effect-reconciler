@@ -99,7 +99,21 @@ const makeEditor = (counters: Counters) => {
   })
 }
 
-const bindEditor = (editor: ReturnType<typeof makeEditor>, counters: Counters) =>
+/**
+ * The same Binding twice: once as the full sweep, once declaring what each
+ * selector reads.
+ *
+ * Only `diagnostics` gets `deps`, and that is the whole point — it is the one
+ * selector owned by a `many` family, so it is the one that runs N times per
+ * commit while the other five run once each. What it reads is nothing: its
+ * key is a constant. Declaring that is what lets ten thousand calls become
+ * zero.
+ */
+const bindEditor = (
+  editor: ReturnType<typeof makeEditor>,
+  counters: Counters,
+  incremental: boolean
+) =>
   editor.bind<Model>((bind) => ({
     settings: bind.one(editor.Settings, (m) => {
       counters.selectors++
@@ -117,14 +131,22 @@ const bindEditor = (editor: ReturnType<typeof makeEditor>, counters: Counters) =
       counters.selectors++
       return Option.some(m.language)
     }),
-    documents: bind.many(editor.Document, (m) => {
-      counters.selectors++
-      return m.documents
-    }),
-    diagnostics: bind.one(editor.Diagnostics, () => {
-      counters.selectors++
-      return Option.some(null)
-    })
+    documents: bind.many(
+      editor.Document,
+      (m) => {
+        counters.selectors++
+        return m.documents
+      },
+      incremental ? { deps: (m) => m.documents } : undefined
+    ),
+    diagnostics: bind.one(
+      editor.Diagnostics,
+      () => {
+        counters.selectors++
+        return Option.some(null)
+      },
+      incremental ? { deps: () => null } : undefined
+    )
   }))
 
 interface Sample {
@@ -179,7 +201,7 @@ describe("scale", () => {
         Effect.gen(function* () {
           const counters: Counters = { starts: 0, stops: 0, selectors: 0 }
           const editor = makeEditor(counters)
-          const controller = yield* Reconciler.make(bindEditor(editor, counters))
+          const controller = yield* Reconciler.make(bindEditor(editor, counters, false))
 
           const documents = Array.from({ length: size }, (_, i) => `file:///doc-${i}.ts`)
           const baseline: Model = {
@@ -286,4 +308,92 @@ describe("scale", () => {
       600_000
     )
   }
+
+  // The A/B for incremental bindings, at the one size where selector
+  // evaluation is a visible share of commit latency. Same topology, same
+  // scenarios, same assertions about churn — the only difference is whether
+  // the per-document selector declares what it reads.
+  it.live(
+    "incremental bindings (10,000 documents)",
+    () =>
+      Effect.gen(function* () {
+        const size = 10_000
+        const documents = Array.from({ length: size }, (_, i) => `file:///doc-${i}.ts`)
+        const baseline: Model = {
+          settingsRevision: 1,
+          user: "alice",
+          workspaceId: "acme",
+          language: "typescript",
+          documents
+        }
+
+        const measure = (incremental: boolean) =>
+          Effect.gen(function* () {
+            const counters: Counters = { starts: 0, stops: 0, selectors: 0 }
+            const editor = makeEditor(counters)
+            const controller = yield* Reconciler.make(bindEditor(editor, counters, incremental))
+
+            const once = function* (model: Model) {
+              counters.starts = 0
+              counters.stops = 0
+              counters.selectors = 0
+              const t0 = performance.now()
+              yield* controller.commit(model)
+              const t1 = performance.now()
+              yield* idle(controller)
+              return {
+                commitMs: t1 - t0,
+                convergeMs: performance.now() - t1,
+                selectors: counters.selectors,
+                starts: counters.starts,
+                stops: counters.stops
+              } satisfies Sample
+            }
+
+            yield* once(baseline)
+            const scenario = function* (name: string, there: Model, back: Model) {
+              yield* once(there)
+              yield* once(back)
+              const samples: Array<Sample> = []
+              for (let round = 0; round < samplesPerScenario; round++) {
+                samples.push(yield* once(there))
+                yield* once(back)
+              }
+              rows.push({
+                documents: size,
+                scenario: `${name} [${incremental ? "incremental" : "full sweep"}]`,
+                samples
+              })
+              return samples[samples.length - 1]!
+            }
+
+            const equivalent = yield* scenario("A equivalent commit", { ...baseline }, {
+              ...baseline
+            })
+            const churned = [...documents.slice(1), "file:///added.ts"]
+            const oneChanged = yield* scenario(
+              "B one document changed",
+              { ...baseline, documents: churned },
+              baseline
+            )
+            return { equivalent, oneChanged }
+          }).pipe(Effect.scoped)
+
+        const full = yield* measure(false)
+        const memoized = yield* measure(true)
+
+        // Churn is identical: the optimization changed how desire is computed,
+        // not what is identical to what. This is the assertion that makes the
+        // timings above worth reading at all.
+        expect(memoized.equivalent.starts).toBe(full.equivalent.starts)
+        expect(memoized.equivalent.stops).toBe(full.equivalent.stops)
+        expect(memoized.oneChanged.starts).toBe(full.oneChanged.starts)
+        expect(memoized.oneChanged.stops).toBe(full.oneChanged.stops)
+
+        // Five selectors instead of ten thousand and five.
+        expect(memoized.equivalent.selectors).toBeLessThan(full.equivalent.selectors / 100)
+        report()
+      }),
+    600_000
+  )
 })

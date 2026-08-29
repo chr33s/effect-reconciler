@@ -1,10 +1,12 @@
 import * as Effect from "effect/Effect"
 import type * as Option from "effect/Option"
-import type * as Stream from "effect/Stream"
 import type * as Scope from "effect/Scope"
+import * as Stream from "effect/Stream"
+import * as SubscriptionRef from "effect/SubscriptionRef"
 import type { BindApi, Binding, BindingEntry, LabeledEntry } from "./Binding.js"
 import {
   HandleTypeId,
+  observed as observedWitness,
   type AnyHandle,
   type DefineApi,
   type DefinitionIdentity,
@@ -14,9 +16,11 @@ import {
   type OwnerOf,
   type RootRequirementsOf
 } from "./Definition.js"
+import type { Diagnostics, ReconcileEvent } from "./Diagnostics.js"
 import type { BindingError, CommitError, ControllerClosed, DefinitionError } from "./Errors.js"
 import type { LifetimeFailure } from "./Failure.js"
 import type { LifetimeRef } from "./LifetimeRef.js"
+import type { Snapshot } from "./Snapshot.js"
 import type { LifetimeStatus } from "./Status.js"
 import { compileBinding, compileDefinition } from "./internal/compiledDefinition.js"
 import { makeController } from "./internal/controller.js"
@@ -62,6 +66,8 @@ export const define = <H extends Record<string, AnyHandle>>(
           options.replacement !== undefined && options.replacement._tag === "Overlap"
             ? "overlap"
             : "sequential",
+        supervision: options.supervision ?? { _tag: "Manual" },
+        observes: options.observes !== undefined,
         start: options.start
       }
       families.push(handle)
@@ -80,10 +86,16 @@ export const define = <H extends Record<string, AnyHandle>>(
   ): Binding<State, never> => {
     const bound =
       (cardinality: "one" | "many") =>
-      (handle: AnyHandle, selector: unknown): BindingEntry<State> => ({
+      (
+        handle: AnyHandle,
+        selector: unknown,
+        options?: { readonly deps?: unknown; readonly observe?: unknown }
+      ): BindingEntry<State> => ({
         handle,
         cardinality,
-        selector: selector as (state: State, owner: unknown) => unknown
+        selector: selector as (state: State, owner: unknown) => unknown,
+        deps: options?.deps as BindingEntry<State>["deps"],
+        observe: options?.observe as BindingEntry<State>["observe"]
       })
     const api = { one: bound("one"), many: bound("many") } as unknown as BindApi<State>
     // The record key is the name the application gave this selector, and the
@@ -134,6 +146,16 @@ export const ref = <H extends AnyHandle>(
  * under the same semantic key, without the application inventing a retry
  * nonce or withdrawing and restoring desire.
  *
+ * `snapshot` is `status` for every lifetime at one instant, coherently: a
+ * tree assembled from separate `status` calls can show a child Running under
+ * an owner that has already stopped, and one assembled from a snapshot
+ * cannot.
+ *
+ * `events` and `diagnostics` are for understanding the runtime, never for
+ * driving it. Events are lossy and produced only while something is
+ * subscribed; counters are always maintained. Neither is authoritative —
+ * `status` is.
+ *
  * `shutdown` is idempotent: it stops accepting commits, invalidates all
  * desire, closes the root Scope and awaits structured finalization.
  */
@@ -141,7 +163,10 @@ export interface Controller<in State> {
   readonly commit: (state: State) => Effect.Effect<void, CommitError>
   readonly changes: Stream.Stream<void>
   readonly failures: Stream.Stream<LifetimeFailure>
+  readonly events: Stream.Stream<ReconcileEvent>
   readonly status: (ref: LifetimeRef) => Effect.Effect<Option.Option<LifetimeStatus>>
+  readonly snapshot: Effect.Effect<Snapshot>
+  readonly diagnostics: Effect.Effect<Diagnostics>
   readonly retry: (ref: LifetimeRef) => Effect.Effect<void, ControllerClosed>
   readonly shutdown: Effect.Effect<void>
 }
@@ -165,4 +190,83 @@ export const make = <State, RootR = never>(
     const compiled = yield* Effect.fromResult(compileDefinition(binding.source))
     const entries = yield* Effect.fromResult(compileBinding(compiled, binding))
     return yield* makeController<State>(compiled, entries, rootContext)
+  })
+
+/**
+ * Declare the shape of projected state a family observes:
+ * `observes: Reconciler.observed<SubModel>()`.
+ *
+ * Re-exported here so a Definition needs one import.
+ */
+export const observed = observedWitness
+
+/**
+ * A lifetime that runs a Reconciler of its own.
+ *
+ * ```ts
+ * const Workspace = define.one("Workspace", {
+ *   owner: Session,
+ *   observes: Reconciler.observed<WorkspaceModel>(),
+ *   start: Reconciler.nested<string>()(workspaceBinding)
+ * })
+ * ```
+ *
+ * The empty first call is where the host family's own key type is annotated,
+ * for the same reason `start` normally annotates it: the key type cannot be
+ * inferred from anything here, and a family whose key silently widened could
+ * be bound to desire anything at all. Write `nested()` — the key defaults to
+ * `null` — for a host whose key carries no information, exactly as
+ * `start: (_: null) => …` does.
+ *
+ * Everything this needs already exists, which is the point: the child
+ * Controller is created in the lifetime's own Scope, so it is shut down and
+ * finalized by the same ownership closure that governs every other resource a
+ * lifetime holds (§11), and the projected state the lifetime observes is what
+ * it commits. There is no second lifecycle to reason about — a nested
+ * Reconciler stops when its host lifetime stops, for the same structural
+ * reason a child lifetime does.
+ *
+ * What it buys is **modularity of the Definition**, which is the thing a flat
+ * Definition cannot give: a feature ships its own families, its own Binding
+ * and its own state shape, and an application mounts the whole thing under an
+ * owner without its families joining the parent's identity space or its
+ * selectors running on the parent's every commit. A parent commit that does
+ * not change the projection reaches the child not at all (§8.4 applies to the
+ * projection, by `Equal`), and one that does costs the child one commit —
+ * over its own families only.
+ *
+ * The trade is equally real, and it is the reason this is a helper rather
+ * than the default. Two Controllers are two reconcile loops: the child's
+ * families cannot own, require, or be required by the parent's, `status` and
+ * `snapshot` on the parent say nothing about the child's lifetimes, and
+ * convergence across the boundary is two asynchronous steps rather than one.
+ * Nest when a subtree is genuinely a separate concern with its own state
+ * shape. Do not nest to organize a Definition that would work flat.
+ *
+ * Whatever the child's startup Effects need from the root environment becomes
+ * a requirement of the host family, and so of the parent `Reconciler.make` —
+ * the same rule that governs an ordinary lifetime (§6.2), applied through one
+ * more level.
+ */
+export const nested = <K = null>() =>
+<SubState, RootR = never>(binding: Binding<SubState, RootR>) =>
+(
+  _key: K,
+  state: SubscriptionRef.SubscriptionRef<SubState>
+): Effect.Effect<void, DefinitionError | BindingError | CommitError, Scope.Scope | RootR> =>
+  Effect.gen(function* () {
+    const controller = yield* make(binding)
+    // The first commit is made here, not in the forked fiber, so a Definition
+    // or Binding that cannot accept the initial projection fails *startup* —
+    // visibly, as a Failed lifetime with a cause — rather than dying inside a
+    // background fiber of a lifetime that reports itself Running.
+    yield* controller.commit(yield* SubscriptionRef.get(state))
+    yield* Effect.forkScoped(
+      Stream.runForEach(SubscriptionRef.changes(state), (next) =>
+        // `changes` replays the current value, so this re-commits what was
+        // just committed. That costs nothing: an equivalent commit is exactly
+        // zero churn (§8.4), which is the same property that lets a UI commit
+        // on every keystroke.
+        Effect.orDie(controller.commit(next)))
+    )
   })

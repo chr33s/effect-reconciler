@@ -35,6 +35,10 @@ const explain = <A>(
       CapabilityCycle: (error) => Effect.succeed(`capability cycle at ${error.family.name}`),
       ForeignHandle: (error) => Effect.succeed(`foreign handle bound as ${error.label}`),
       MissingBinding: (error) => Effect.succeed(`missing binding for ${error.family.name}`),
+      MissingObservation: (error) =>
+        Effect.succeed(`no projection for ${error.family.name}, which observes state`),
+      UnexpectedObservation: (error) =>
+        Effect.succeed(`${error.family.name} observes nothing, so it needs no projection`),
       DuplicateBinding: (error) => Effect.succeed(`duplicate binding for ${error.family.name}`),
       CardinalityMismatch: (error) =>
         Effect.succeed(`${error.family.name} is ${error.declared}, bound as ${error.used}`)

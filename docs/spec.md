@@ -513,8 +513,11 @@ interface Controller<State> {
   readonly commit: (state: State) => Effect<void, CommitError>
   readonly retry: (ref: LifetimeRef) => Effect<void, ControllerClosed>
   readonly status: (ref: LifetimeRef) => Effect<Option<LifetimeStatus>>
+  readonly snapshot: Effect<Snapshot>
   readonly failures: Stream<LifetimeFailure>
   readonly changes: Stream<void>
+  readonly events: Stream<ReconcileEvent>
+  readonly diagnostics: Effect<Diagnostics>
   readonly shutdown: Effect<void>
 }
 ```
@@ -615,6 +618,177 @@ It promises nothing about *when* anything converges. §8.3 still holds: commit
 does not await convergence, and an edge that says "something moved" says
 nothing about how long anything took or will take.
 
+### 9.6 Snapshots
+
+```ts
+controller.snapshot    // Effect<Snapshot>
+```
+
+> Every generation the runtime is tracking, read at one instant: a
+> `(LifetimeRef, LifetimeStatus)` for each, owners before children.
+
+A snapshot adds no vocabulary — every entry is the pair a single `status` call
+already produces — so §9.4 is untouched. What it adds is *coherence*. N
+separate `status` calls interleave with N−1 opportunities for the runtime to
+move underneath them, and a tree assembled from them can show a child Running
+beneath an owner that has already stopped. A snapshot is taken under the same
+serialization the reconciler mutates under, so it cannot.
+
+Generations that are `Stopping` appear: they exist, and a view that omitted
+them would show a slot as free while the resource in it is still draining.
+`snapshot.get(ref)` answers exactly as `status` did at that instant.
+
+It is a value, not a view. It does not update; take another when `changes`
+says something moved. The cost is one pass over live generations, paid when
+asked and never as part of reconciliation.
+
+### 9.7 Diagnostics
+
+```ts
+controller.events        // Stream<ReconcileEvent>
+controller.diagnostics   // Effect<Diagnostics>
+```
+
+**Both are for understanding the runtime, never for driving it.** `status` and
+`snapshot` remain the only authorities; anything derived from events
+recreates the second source of truth §13.9 forbids.
+
+`events` reports what the reconciler did — a commit published, a generation
+admitted, started, failed, retired or stopped, a pass completed. A retirement
+carries its **reason**: `desire`, `owner`, `provider`, `retry` or `shutdown`.
+That reason is the one thing no query can answer, and the reason to have the
+channel at all: `status` will say a lifetime is Running, and cannot say that
+it restarted because a provider three levels up was replaced.
+
+Its delivery contract is weaker than the failure stream's, deliberately:
+
+- events are **constructed only while something is subscribed**, so a
+  Controller nobody is watching does not pay to build a `LifetimeRef` per
+  transition;
+- delivery begins where the subscription does, and what happened in between
+  is not seen — the channel is lossy at its start as well as under overflow;
+- the buffer is bounded and drops the oldest;
+- publication never blocks reconciliation.
+
+`diagnostics` is cumulative counters plus the current lifecycle census. Unlike
+events they are always maintained, being integer increments on paths already
+walked, and they are what a health endpoint or the §15 "reconsider when"
+trigger actually wants. Two readings subtract to give a rate.
+
+### 9.8 Supervision
+
+```ts
+define.one("Server", {
+  supervision: Supervision.restart(
+    Schedule.exponential("100 millis").pipe(Schedule.upTo({ times: 5 }))
+  ),
+  start: (key: string) => …
+})
+```
+
+> A policy for a startup that **failed**: retire the failed generation and let
+> a fresh one be admitted, on a schedule.
+
+The default is `Supervision.manual()` and stays the default: a runtime that
+retries by itself turns a configuration error into an unbounded stream of
+connection attempts nobody asked for.
+
+The narrowness is the design. A lifetime *is* its Scope; once `start` returns
+the lifetime is Running, and supervising what happens inside it is what
+`Effect.retry` and `Schedule` are already for — inside `start`, where the code
+that knows what failed lives. The one thing an application cannot express for
+itself is a startup that never completed, in a slot the runtime owns, under a
+key the runtime assigned.
+
+A policy does exactly what §9.3's `retry` does, on a schedule instead of on a
+call, and changes semantic identity no more than `retry` does. Its schedule is
+driven per semantic identity — so it counts *across* generations, which is
+the whole point — and resets when the question it was asking changes: the
+lifetime reaches Running, its desire is withdrawn, its owner or a provider
+replaces it, or `Controller.retry` is called for it. It does not reset on its
+own attempts, or it could never reach its own limit.
+
+An exhausted schedule stops. The generation stays Failed, which is a state and
+not a dead end: `status` reports it, `retry` still works, changing desire still
+replaces it.
+
+### 9.9 Incremental bindings
+
+```ts
+bind.many(Document, (state, owner) => state.docsByWorkspace[owner.key], {
+  deps: (state, owner) => state.docsByWorkspace[owner.key]
+})
+```
+
+> Optional: what a selector reads. Unchanged by `Equal.equals` since the last
+> commit for the same owner means the selector is not called, and the keys and
+> semantic identities it produced are reused.
+
+Binding evaluation is O(N) per commit by default and stays that way (§15). The
+cost that is not free is a family owned by a `many` family, whose selector
+runs once per live owner: ten thousand documents means ten thousand calls per
+commit, most returning what they returned last time.
+
+The contract is the caller's to keep, and the runtime cannot check it:
+
+> If `deps` is unchanged, the selector must return the same keys.
+
+Break it and a lifetime will not start or stop when it should. That is why it
+is opt-in, and why correctness never depends on it: writing nothing gives the
+full sweep, which is always right.
+
+It is not a free win, and `bench/RESULTS.md` measures both directions. On
+unchanged data it is about three times cheaper end to end — mostly through
+reused identities, whose hashes are already cached, rather than through the
+skipped calls. On data that changes on most commits it is a pessimization: a
+miss pays for the `deps` call and a memo probe on top of the work it could not
+avoid. And it wants the whole owner chain: a memo keyed by an owner identity
+that was itself just rebuilt pays a full structural hash on every probe, which
+measured *worse* than no memo at all.
+
+### 9.10 Observed state and nested Reconcilers
+
+```ts
+define.one("Workspace", {
+  owner: Session,
+  observes: Reconciler.observed<WorkspaceModel>(),
+  start: Reconciler.nested<string>()(workspaceBinding)
+})
+```
+
+> A family may declare a *shape of state* it observes. Every Binding must then
+> project that shape out of its own state, and each running generation is
+> handed a `SubscriptionRef` of the projection — seeded at admission, updated
+> on every commit that changes it.
+
+This is the only channel by which a *running* lifetime sees state change
+rather than being replaced by it, and it is narrow on purpose. A key change
+still replaces the lifetime; desire is still, and only, the keys the selectors
+produce. Observation cannot start or stop anything.
+
+A Definition is state-independent (§4.4), so it names a shape rather than the
+application's state type; a Binding that declared no projection for a family
+that needs one is a `MissingObservation` binding error at `Reconciler.make`
+(§4.3). Projections coalesce to the latest exactly as desire does (§7.3,
+§11) and are compared with `Equal.equals`, so a rebuilt state object with an
+equivalent projection is not news. An obsolete generation is never updated.
+
+`Reconciler.nested` is the three lines that fall out of it: a lifetime whose
+`start` creates a Controller of its own in its own Scope and commits the
+projection to it. It buys **modularity of the Definition** — a feature ships
+its own families, Binding and state shape, and an application mounts the whole
+thing under an owner. The child stops when its host stops, by the same
+ownership closure that governs every other resource a lifetime holds (§11),
+with no second lifecycle to reason about.
+
+The trade is real, which is why it is a helper and not the default. Two
+Controllers are two reconcile loops: the child's families cannot own, require
+or be required by the parent's; the parent's `status` and `snapshot` say
+nothing about the child's lifetimes; and convergence across the boundary is
+two asynchronous steps rather than one. Nest a subtree that is genuinely a
+separate concern with its own state shape. Do not nest to organize a
+Definition that would work flat.
+
 ## 10. Errors
 
 Expected failures are Effect-style tagged data carrying the family they
@@ -624,7 +798,8 @@ concern, so recovery is ordinary `catchTag` / `catchTags`:
 DefinitionError = ForeignOwner | OwnershipCycle | ForeignRequirement
                 | CapabilityCycle | AmbiguousProvider | UnresolvableProvider
 
-BindingError    = ForeignHandle | MissingBinding | DuplicateBinding
+BindingError    = ForeignHandle | MissingBinding | MissingObservation
+                | UnexpectedObservation | DuplicateBinding
                 | CardinalityMismatch
 
 CommitError     = ControllerClosed | InvalidDesiredState
@@ -820,7 +995,55 @@ without it, subscribing and taking a first reading cannot be ordered safely,
 and an observer could sit forever on a reading taken a moment too early.
 *Evidence:* §9.5, `test/observation.test.ts`, `examples/ui/mirror.ts`.
 
-**13.14 Optimization waits for measured pressure.** See §15.
+**13.14 Observation is a query, diagnosis is a stream.** Everything an
+application may *depend on* is a query — `status`, `snapshot` — and everything
+that explains how it got there is a stream — `failures`, `changes`, `events`.
+The split is not stylistic. A stream that reconciliation must not block on has
+to be lossy, and a lossy channel cannot be an authority (§13.9); a query taken
+under the reconciler's own serialization is coherent and cannot be missed. So
+the streams are allowed to say the one thing queries cannot — *why* — and are
+never allowed to say *what*. A retirement reason is safe on a stream for
+exactly this reason: no application state can be derived from it, because the
+state it would be derived from is already on `status`. *Evidence:* §9.6, §9.7,
+`test/snapshot.test.ts`, `test/diagnostics.test.ts`,
+`examples/devtools/panel.ts`.
+
+**13.15 Supervision covers the gap the application cannot reach.** A restart
+policy that supervised a *running* lifetime would be reimplementing
+`Effect.retry` a level away from the code that knows what failed, and worse
+than it. The gap Effect cannot close is the other one: a startup that never
+completed, in a slot the runtime owns, under a key the runtime assigned — no
+application-level retry can retire that generation or decide when its
+successor may be admitted. So the policy covers exactly that and nothing else,
+it is the same transition `retry` performs, and it is off by default because a
+runtime that retries uninstructed converts a configuration error into an
+unbounded stream of attempts. *Evidence:* §9.8, `test/supervision.test.ts`.
+
+**13.16 Incrementality is opt-in, unchecked, and measured.** The runtime
+cannot verify that a selector reads only what its `deps` say, so an incorrect
+declaration produces a lifetime that does not start when it should — the worst
+failure this design has. That is affordable only because it is opt-in and the
+default sweep is always right (§15). It also turned out not to be a
+straightforward win: measured, it is ~3× cheaper on unchanged data and ~3×
+more expensive at the commit boundary on data that changes, and applying it to
+one level of an owner chain without the level above it was *worse* than not
+applying it at all. A memo whose key is expensive to compute is not a memo.
+Shipping the measurement alongside the feature is the point. *Evidence:*
+§9.9, §15, `bench/RESULTS.md`, `test/incremental.test.ts`.
+
+**13.17 A nested Reconciler is a lifetime, not a new concept.** The
+alternative was composing Definitions — sub-families merged into the parent's
+identity space — which would have meant one identity scheme spanning
+independently authored features, cross-Definition ownership and requirement
+resolution, and no way to keep a feature's state shape its own. Nesting
+instead makes the child an ordinary resource of an ordinary lifetime: it is
+finalized by the ownership closure that already exists (§11), it needs no new
+shutdown rule, and the only genuinely new primitive is observation — one
+`SubscriptionRef` that cannot start or stop anything. The price is that the
+two runtimes do not share an identity space, and that price is stated rather
+than hidden. *Evidence:* §9.10, `test/nested.test.ts`.
+
+**13.18 Optimization waits for measured pressure.** See §15.
 
 ## 14. Conformance
 
@@ -859,6 +1082,23 @@ and an observer could sit forever on a reading taken a moment too early.
 - change signals report every transition `status` can report and stay silent
   through an equivalent commit, coalesce under a one-slot subscription, and
   prompt a late or racing subscriber exactly once (`observation.test.ts`);
+- a snapshot reports every generation owners-first, answers as `status` does,
+  cannot contradict itself mid-transition, and is empty after shutdown
+  (`snapshot.test.ts`);
+- events name why each generation was retired, report one generation's
+  lifecycle in order, and retain nothing for a Controller nobody is watching;
+  counters are maintained regardless (`diagnostics.test.ts`);
+- supervision is off by default, restarts a failed startup under the same key,
+  stops when its schedule is exhausted, ends when desire is withdrawn, and
+  resets once the lifetime runs (`supervision.test.ts`);
+- an incremental binding skips exactly the selectors whose declared
+  dependencies are unchanged, produces the same desire the full sweep does
+  across a sequence of commits, and forgets owners that went away
+  (`incremental.test.ts`);
+- observed state reaches a running lifetime without replacing it, coalesces to
+  the latest, never reaches an obsolete generation, and is required of a
+  Binding that declared it; a nested Reconciler reconciles on its parent's
+  commits and dies with its host (`nested.test.ts`);
 - ordinary Effect stays ordinary inside `start`: transient retry schedules and
   Layer building work unchanged (`effectNative.test.ts`).
 
@@ -893,24 +1133,49 @@ commit column is the one to watch, not the median. Correctness must never
 depend on such an optimization: the semantic contract stays
 full-snapshot-equivalent.
 
+Incremental bindings (§9.9) are that reconsideration, taken and measured. They
+are opt-in for the reason above — a Binding that declares its dependencies
+wrongly produces a lifetime that does not start, and the runtime cannot check
+the declaration — and the default remains the full sweep, which is always
+right. What the measurement says is not what "add a memo" usually implies:
+about three times cheaper end to end on unchanged data, about three times more
+expensive at the commit boundary on data that changes, and *worse than nothing*
+when applied to one level of an owner chain without the level above it,
+because a memo keyed by a freshly rebuilt identity pays a full structural hash
+on every probe. The saving is mostly the reused identities, not the skipped
+calls. `bench/RESULTS.md` has both directions and the guidance that follows
+from them.
+
 ## 16. Scope boundary and the decision
 
-### 16.1 Deferred from v0
+### 16.1 What is now in, and what is still out
 
-Not implemented, deliberately: the snapshot API, diagnostics and DevTools, a
-stable reconciliation event stream, supervision and retry policy DSLs,
-incremental selectors, and nested Reconcilers.
+Everything v0 deferred has been built: the snapshot API (§9.6), diagnostics
+and the reconciliation event stream (§9.7, with `examples/devtools` as the
+panel over them), a supervision policy DSL (§9.8), incremental selectors
+(§9.9), and nested Reconcilers (§9.10).
 
-`Controller.changes` (§9.5) is not the reconciliation event stream this list
-defers, and does not become it. A stream of *events* — what moved, from which
-state to which — would be a second, lossy source of truth about the same
-lifetimes `status` already answers for; a payload-free prompt cannot be,
-because it says nothing `status` could contradict (§13.13).
+Three of them changed shape on the way in, and the shapes are the interesting
+part:
+
+- **The event stream is diagnostic, and says so.** It reports *why*, never
+  *what* — the authority stays on `status` and `snapshot`, because a channel
+  reconciliation must not block on has to be lossy (§13.14).
+- **Supervision covers startup failure only.** Supervising a running lifetime
+  would be a worse `Effect.retry` placed further from the code that knows what
+  failed (§13.15).
+- **Incremental selectors are opt-in and were not a free win.** Measured, they
+  are ~3× cheaper on unchanged data and ~3× more expensive on changed data;
+  the measurement ships with the feature (§13.16, `bench/RESULTS.md`).
+
+Still out, and now for reasons rather than for lack of time: composing
+Definitions into one identity space (§13.17 takes nesting instead), and
+supervision of running lifetimes.
 
 Out of scope entirely: query caching, stale-time policies, actor mailboxes,
 durable workflows, distributed orchestration, remote reconciliation, automatic
-dependency discovery, arbitrary capability cycles, renderer, router, forms, HMR
-and general signal reactivity. For every proposed feature the question is
+dependency discovery, arbitrary capability cycles, renderer, router, forms,
+HMR and general signal reactivity. For every proposed feature the question is
 whether it is necessary for *state-reconciled keyed Effect lifetimes*.
 
 Pressure worth tracking before adding anything: `many`-provider selection,
@@ -988,8 +1253,8 @@ costs.
 
 Done, on the strength of §16.3:
 
-- package metadata — `exports` (the eight public modules and the root; nothing
-  under `internal/` is reachable through it), `types`, `files`, `sideEffects`,
+- package metadata — `exports` (the public modules and the root; nothing under
+  `internal/` is reachable through it), `types`, `files`, `sideEffects`,
   `repository`, `license`, `keywords`, `engines`, `publishConfig`;
 - an intentional build output: `tsconfig.build.json` emits ESM, declarations,
   declaration maps and source maps to `dist/`, and the tarball ships `src/`
@@ -998,14 +1263,17 @@ Done, on the strength of §16.3:
 - Effect stays a **peer** dependency. A second copy in a consumer's tree is a
   second runtime identity, and services published by a lifetime would not be
   the services the consumer's code asks for;
-- an experimental `0.x` release. `Definition`, `Binding`, `commit`, `status`
-  and `shutdown` are what the README tells a reader to build on; `retry`,
-  `failures`, `changes` and everything else about observability and
-  diagnostics are named unstable and may change shape within `0.x`;
+- an experimental `0.x` release. `Definition`, `Binding`, `commit`, `status`,
+  `snapshot` and `shutdown` are what the README tells a reader to build on;
+  `retry`, `failures`, `changes`, `events`, `diagnostics`, supervision
+  policies, incremental `deps` and observed state are named unstable and may
+  change shape within `0.x`;
 - documentation covering the 30-second mental model, root `one`, ownership,
   `many`, capability dependencies, failure and retry, control-plane
   integration including Foldkit, the comparison with `RcMap`/`LayerMap`, the
   non-goals, and the concurrency guarantees together with the non-guarantees.
 
-What `0.x` does not carry, and what a `1.0` would have to answer for, is
-§16.1's deferred list and the two adoption costs in §16.3.
+What `0.x` does not carry, and what a `1.0` would have to answer for, is the
+two adoption costs in §16.3 and the newest surface's own lack of production
+mileage: §9.6–§9.10 are specified, conformance-tested and measured, but they
+have not yet been through what §16.3 put the kernel through.

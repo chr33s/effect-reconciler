@@ -43,8 +43,15 @@ export const makeFinalization = (options: {
   /** The controller's serialization mutex: bookkeeping runs under it. */
   readonly mutex: Semaphore.Semaphore
   readonly wakeUp: Effect.Effect<void>
+  /**
+   * Called under the mutex for each generation dropped, once its finalization
+   * boundary is genuinely reached. This is the only place that boundary is
+   * known, which is why the controller's `Stopped` accounting is a callback
+   * from here rather than something it could observe for itself.
+   */
+  readonly onStopped: (inst: LiveInstance) => void
 }): Finalization => {
-  const { live, mutex, rootScope, wakeUp } = options
+  const { live, mutex, onStopped, rootScope, wakeUp } = options
   const serialized = mutex.withPermits(1)
 
   const closeInstance = (
@@ -83,7 +90,10 @@ export const makeFinalization = (options: {
         pipe(
           serialized(
             Effect.sync(() => {
-              for (const stopped of ownedSubtree(inst, [])) forget(live, stopped)
+              for (const stopped of ownedSubtree(inst, [])) {
+                forget(live, stopped)
+                onStopped(stopped)
+              }
             })
           ),
           Effect.andThen(wakeUp)
