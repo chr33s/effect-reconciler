@@ -48,3 +48,27 @@ jobs:
       # to everything above this line.
       - name: Verify the package a consumer would install
         run: npm run verify-package
+
+  experiments:
+    name: architectural experiments (node 24)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      # Deliberately separate from package conformance/prepack. The prototype
+      # stays type-checked and tested without redefining publishability.
+      - name: Type-check Layer + Atom experiments
+        run: npm run check:experiments
+
+      - name: Effect diagnostics for Layer + Atom experiments
+        run: npm run lint:experiments
+
+      - name: Test Layer + Atom experiments
+        run: npm run test:experiments

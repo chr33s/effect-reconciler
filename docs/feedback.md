@@ -1,13 +1,16 @@
 # effect-reconciler — Next Steps After Layer + Effect Atom Review
 
 > **Implemented as an architectural experiment (2026-08-29).** The direct
-> Layer + Atom baseline, parity helper, conformance scenarios, 100 / 1k / 10k
+> Layer + Atom baseline, lifecycle helper, targeted characterizations, 100 / 1k / 10k
 > benchmark and findings are in
-> [`experiments/layer-atom`](../experiments/layer-atom/README.md). The result is
-> provisional: direct Layer + Atom does not provide sequential finalization or
-> keyed generation capture by itself; Atom and Layer do subsume enough reactive
-> and capability machinery to justify a smaller REBASE prototype. Feature
-> expansion remains frozen while that is evaluated.
+> [`experiments/layer-atom`](../experiments/layer-atom/README.md). The follow-up
+> Atom → generation kernel → Layer REBASE prototype is now implemented there as
+> well. Its generic kernel passes the targeted lifecycle scenarios and exact
+> 10k churn, satisfying the prototype SHRINK gate without claiming full package
+> parity. Feature expansion and migration
+> of `src/` remain frozen until a typed family compiler preserves Layer
+> environment inference without restoring the removed Controller complexity.
+> The prototype's `RefCache` already preserves structural semantic-key behavior.
 
 ## Context
 

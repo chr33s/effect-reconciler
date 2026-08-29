@@ -56,17 +56,17 @@ release. The added helper owns physical slots, generations, owner links,
 provider bindings, finalization boundaries, replacement ordering and the
 latest-desire wake loop.
 
-The file is 833 code SLOC including services, probes, Layer definitions, Atom
+The file is 882 code SLOC including services, probes, Layer definitions, Atom
 selectors, the concrete topology and its public test harness. The lifecycle
 portion is concentrated around `slotFor`, `closeInstance`, `beginStop`,
 `retire`, `start`, `invalidate`, `admit` and `pass`. It is smaller than the
-current generic runtime's 1,291 internal code SLOC, but it supports one fixed
+current generic runtime's 1,332 internal code SLOC, but it supports one fixed
 topology and omits Definition/Binding compilation, snapshots, events,
 diagnostics, supervision schedules, observations, nested controllers and the
-public type algebra. It therefore is **not** evidence of an 833-vs-1,291
+public type algebra. It therefore is **not** evidence of an 882-vs-1,332
 library win.
 
-## Conformance result
+## Experimental characterization coverage
 
 Run:
 
@@ -74,7 +74,10 @@ Run:
 npm run experiment:layer-atom
 ```
 
-The parity helper passes:
+The helper currently covers the following targeted scenarios. This checklist
+is **not** a claim of full package parity: experimental tests run separately
+from package conformance and prepack, and the prototype omits supported public
+APIs and validation paths.
 
 ```text
 [x] equal-key retention
@@ -100,7 +103,22 @@ The direct baseline does **not** pass sequential replacement or state-desired
 existence without a root mount. `Atom.refresh` invalidates reactive work, but
 its cancellation path does not await an asynchronous Layer finalizer before
 starting the replacement. Adding the finalization deferred, slot retirement
-set and wake loop is what makes the parity tests pass.
+set and wake loop is what makes these characterization tests pass.
+
+### Startup-completion race
+
+Atom desire publication is synchronous while lifecycle reconciliation is
+asynchronous. A startup can therefore finish after new desire was published but
+before the pass that retires its stale live indexes. Checking only `Starting`
+and slot-current state incorrectly lets that completion publish `Running`.
+
+Both experimental kernels now validate completion directly against the latest
+desired identity, physical owner and captured provider generations. The late
+startup test publishes replacement desire and releases the blocked startup
+immediately—without first waiting for a retirement event. The same exact race
+is permanently covered in the package conformance suite via a test-only
+commit-before-wake hook. The current kernel applies the same recursive
+owner/provider validation before publishing either startup success or failure.
 
 ## Layer findings
 
@@ -249,14 +267,63 @@ columns as though the boundaries were identical.
 | architecture | evidence | result |
 | :--- | :--- | :--- |
 | A. direct Effect + manual controller | `examples/foldkit/before` | Correct with application lifecycle state and 143 coordination SLOC for that scenario |
-| B. current Reconciler | `examples/foldkit/after`, `src/internal` | Generic parity, 62 application coordination SLOC; 1,291 internal code SLOC plus public modules |
+| B. current Reconciler | `examples/foldkit/after`, `src/internal` | Generic parity, 62 application coordination SLOC; 1,332 internal code SLOC plus public modules |
 | C. Layer + Atom + application glue | `direct.ts` | 55 code SLOC, but overlap-only replacement and mount/registry-driven existence |
-| D. Layer + Atom + lifecycle helper | `editor.ts` | Full matrix for one topology; 833 code SLOC total, with controller-shaped generation machinery still present |
+| D. Layer + Atom + lifecycle helper | `editor.ts` | Targeted lifecycle matrix for one topology; 882 code SLOC total, with controller-shaped generation machinery still present |
+| E. Atom → kernel → Layer REBASE | `rebase/` | Generic 540-SLOC lifecycle kernel; lazy Atom status, no duplicated notification/controller surfaces, exact 10k churn |
 
 Architecture D does not collapse to the 55-line baseline. It also does not yet
 prove the current standalone runtime should remain unchanged: Atom clearly
 subsumes manual incrementality, observation and much UI notification work, and
 Layer is a better family construction boundary.
+
+## REBASE prototype
+
+The provisional direction is now implemented in [`rebase/kernel.ts`](rebase/kernel.ts)
+and [`rebase/editor.ts`](rebase/editor.ts):
+
+```text
+Model Atom
+→ derived Atom<DesiredNode[]>
+→ generation/replacement kernel
+→ Layer family generations
+→ lazy Atom status values
+```
+
+The generic kernel is 540 code SLOC. The editor policy adapter is 185 code SLOC,
+excluding the shared service tags, probes and Layer definitions in `editor.ts`.
+For comparison, the current generic runtime internals are 1,332 code SLOC. That
+is meaningful evidence of SHRINK, but not yet an apples-to-apples library
+replacement: the prototype deliberately omits the Definition/Binding compiler,
+rich validation, schedules, diagnostic events and compatibility APIs.
+
+Eleven rebased tests cover the targeted lifecycle subset, including
+owner-relative identity, exact two-provider capture, both replacement policies,
+coalescing, failure/retry, lazy reactive status and scoped finite work. They do
+not establish full compatibility with the package conformance suite. The rebased scale
+benchmark also passes exact churn at 10,000 documents. A representative run:
+
+| documents | scenario | write p50 | converge p50 | starts | stops |
+| ---: | :--- | ---: | ---: | ---: | ---: |
+| 10,000 | equivalent | 3.07 ms | 0.09 ms | 0 | 0 |
+| 10,000 | one document changed | 3.74 ms | 5.46 ms | 2 | 2 |
+| 10,000 | settings replaced | 6.78 ms | 196.09 ms | 10,001 | 10,001 |
+
+Two implementation details proved essential:
+
+1. asynchronous startup/finalizer completions must be batched before the next
+   full desired scan, or a large completion wave causes O(n²) reconciliation;
+2. semantic `Ref` values must be interned by owner and key. Applying structural
+   hashing to freshly allocated full owner paths caused a 10k run to exhaust
+   the heap. Atom remains authoritative for desire and status, but efficient
+   canonical identity remains part of the irreducible kernel.
+
+The prototype removes change/failure streams, observation plumbing, Binding
+`deps`, nested controllers and diagnostic allocation from its core. Status is
+an authoritative Atom created only when requested; snapshots remain a physical
+generation inspection operation. Structured finite work is still routed by
+the kernel because selecting the exact current keyed generation is the part
+`AtomRuntime.fn` cannot infer.
 
 ## Irreducible kernel found
 
@@ -284,26 +351,26 @@ Atom: state reactivity, dependency tracking, subscriptions, observed state,
 Effect/Schedule: retry attempts and backoff policy
 ```
 
-## Provisional decision
+## Implemented direction
 
-**Do not STOP. Do not KEEP the architecture unchanged. Continue with a small
-REBASE prototype, with SHRINK as the acceptance criterion.**
+**REBASE satisfies the prototype-level SHRINK criterion. Keep the stable package
+implementation in place until the remaining type-safety/compiler questions are
+resolved.**
 
-The direct baseline misses the hardest guarantees. The parity implementation
-recreates slots, generations, deferred finalization boundaries and a wake loop,
-which is evidence that a lifecycle kernel remains. At the same time, keeping
-manual `deps`, bespoke observed-state plumbing and UI change machinery as core
-concepts is difficult to justify after the Atom results.
+The prototype demonstrates that Atom-owned desire and status plus Layer-owned
+construction can remove duplicated Controller surfaces while retaining the
+hard lifecycle guarantees in a 540-SLOC generic kernel. It also confirms that
+identity interning, physical slots, generations, finalization boundaries and a
+coalesced wake loop cannot simply be delegated away.
 
-The next implementation should be a policy/compiler over:
-
-```text
-Atom desired identities
-→ small generation/replacement kernel
-→ Layer family generations
-```
-
-and should attempt to remove, not wrap, duplicated Controller APIs.
+The next gate is no longer another lifecycle proof. It is a typed family
+compiler that preserves Effect environment inference without restoring the
+removed Binding/Controller complexity. `RefCache` already canonicalizes
+owner-relative identities with Effect Equal / Hash semantics for structural
+keys; the unresolved constraint is the generic kernel's dynamic Context
+assembly and resulting loss of Layer environment inference. Do not replace
+`src/` until that compiler passes the same matrix and package compatibility
+tests.
 
 ## Question for Effect maintainers
 
@@ -311,7 +378,7 @@ Concrete question produced by the experiment:
 
 > A dynamic Layer selected by AtomRuntime correctly invalidates and rebuilds,
 > but starts the replacement before an asynchronously blocked old Layer
-> finalizer completes. The parity helper adds a per-semantic-slot retiring set,
+> finalizer completes. The lifecycle helper adds a per-semantic-slot retiring set,
 > a completion Deferred and a latest-desire wake loop. Is there an existing
 > Layer/Atom primitive that provides finalization-before-latest-replacement
 > while retaining exact keyed provider-generation capture?

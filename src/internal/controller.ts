@@ -223,9 +223,18 @@ export const TestHooksId: unique symbol = Symbol.for("effect-reconciler/TestHook
  * already takes; they add no production behaviour and are not part of the
  * public `Controller`.
  */
-export interface TestHooks {
+export interface TestHooks<State> {
   /** Hold the controller's serialization mutex for the duration of `effect`. */
   readonly holding: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
+  /**
+   * Test-only commit variant that runs `beforeWake` after publishing desire but
+   * before waking the reconcile loop. It makes startup-completion races
+   * reproducible without exposing scheduler timing in the public Controller.
+   */
+  readonly commitBeforeWake: (
+    state: State,
+    beforeWake: Effect.Effect<void>
+  ) => Effect.Effect<void, CommitError>
   /**
    * Completes once the controller has converged on the published desire:
    * every wake has been reconciled and no instance is still starting or
@@ -247,7 +256,7 @@ export interface ControllerInternal<State> {
   readonly diagnostics: Effect.Effect<Diagnostics>
   readonly retry: (ref: LifetimeRef) => Effect.Effect<void, ControllerClosed>
   readonly shutdown: Effect.Effect<void>
-  readonly [TestHooksId]: TestHooks
+  readonly [TestHooksId]: TestHooks<State>
 }
 
 /**
@@ -383,6 +392,47 @@ export const makeController = <State>(
         () => Effect.void
       let onStarted: (ident: Ident) => void = () => {}
 
+      /**
+       * Validate a startup completion against the already-published desired
+       * snapshot, not merely against the last reconcile pass. A commit and a
+       * startup completion race for the same mutex; publication can therefore
+       * be newer than `inst.status` and the live indexes. Recursing through
+       * owner/provider bindings rejects stale physical ancestry even when this
+       * instance's own semantic key is still desired.
+       */
+      const startupIsAuthoritative = (
+        inst: LiveInstance,
+        checked: Set<LiveInstance> = new Set()
+      ): boolean => {
+        if (checked.has(inst)) return true
+        checked.add(inst)
+        if (inst.status !== "starting" && inst.status !== "running") return false
+        if (currentInstance(live, inst.ident) !== inst) return false
+        const node = Option.getOrUndefined(MutableHashMap.get(desired.byIdent, inst.ident))
+        if (node === undefined) return false
+
+        if (node.parent === null) {
+          if (inst.owner !== null) return false
+        } else {
+          const owner = currentInstance(live, node.parent.ident)
+          if (owner === undefined || owner !== inst.owner || !startupIsAuthoritative(owner, checked)) {
+            return false
+          }
+        }
+
+        const family = compiled.families[inst.familyId]!
+        for (const requirement of family.requires) {
+          const expected = resolveProvider(live, desired, node, requirement)
+          const captured = inst.providers.get(requirement.name)
+          if (
+            expected === undefined ||
+            expected !== captured ||
+            !startupIsAuthoritative(expected, checked)
+          ) return false
+        }
+        return true
+      }
+
       const onStartupDone = (
         inst: LiveInstance,
         exit: Exit.Exit<unknown, unknown>
@@ -399,6 +449,10 @@ export const makeController = <State>(
               // publishes capabilities or regains authority: both leave the
               // `starting` state.
               if (!open || inst.status !== "starting") return Effect.void
+              // Desire publication linearizes at commit, before the async pass
+              // retires stale indexes. Never let a completion in that window
+              // publish Running/Failed; the owed pass closes it instead.
+              if (!startupIsAuthoritative(inst)) return wakeUp
               if (Exit.isSuccess(exit)) {
                 concludeStartup(live, inst, "running")
                 counters.started++
@@ -819,7 +873,10 @@ export const makeController = <State>(
        * completion exactly once. The caller never faces a "maybe committed"
        * outcome.
        */
-      const commit = (state: State): Effect.Effect<void, CommitError> =>
+      const commitWith = (
+        state: State,
+        beforeWake: Effect.Effect<void>
+      ): Effect.Effect<void, CommitError> =>
         Effect.suspend(() => {
           // A closed Controller can only ever answer `ControllerClosed`, so
           // evaluating the Binding first would be an O(N) selector sweep whose
@@ -831,13 +888,9 @@ export const makeController = <State>(
           // authoritative check is still the one inside the publication
           // region below.
           if (!open) return Effect.fail(new ControllerClosed())
-          // Pure, against this one immutable state value, outside the critical
-          // section and outside any mask.
           // Evaluated outside the critical section, against one immutable
-          // state value — including the memo reads and writes. That is safe
-          // only because `commit` is the sole caller and commits linearize on
-          // the same mutex the publication below takes: two commits can queue
-          // for publication, but they cannot evaluate at the same time.
+          // state value — including the memo reads and writes. Public commits
+          // and the test-only race hook both publish under the same mutex.
           const snapshot = evaluate(compiled, entries, state, memory)
           return serialized(
             // [atomic publication region]
@@ -849,11 +902,14 @@ export const makeController = <State>(
                 desiredRevision++
                 counters.commits++
                 emit(() => ({ _tag: "Committed", desired: desired.topo.length }))
-                return wakeUp
+                return Effect.andThen(beforeWake, wakeUp)
               })
             )
           )
         })
+
+      const commit = (state: State): Effect.Effect<void, CommitError> =>
+        commitWith(state, Effect.void)
 
       /** What one generation reports as. The single translation from internal
        * lifecycle to public vocabulary, so `status` and `snapshot` cannot
@@ -1143,6 +1199,7 @@ export const makeController = <State>(
         shutdown,
         [TestHooksId]: {
           holding: serialized,
+          commitBeforeWake: commitWith,
           idle,
           eventSubscribers: Effect.sync(() => eventSubscribers)
         }

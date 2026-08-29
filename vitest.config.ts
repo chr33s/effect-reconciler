@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config"
+import { configDefaults, defineConfig } from "vitest/config"
 
 // Solid publishes a `node` export condition that resolves to its SSR build,
 // where the reactive primitives are inert stubs — under Node's default
@@ -23,6 +23,10 @@ export default defineConfig({
     }
   },
   test: {
+    // Package conformance and publish verification must not be made flaky by
+    // architectural experiments. Experiments have their own explicit script
+    // and CI job, while `npm test` / prepack stay on the supported package.
+    exclude: [...configDefaults.exclude, "experiments/**"],
     server: { deps: { inline: ["solid-js"] } }
   }
 })

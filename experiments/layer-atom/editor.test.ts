@@ -109,10 +109,15 @@ describe("Layer + Atom editor experiment", () => {
         "slow document admitted"
       )
 
+      // Atom desire is published synchronously by commit. Release startup
+      // immediately, before waiting for a retirement pass: completion must
+      // validate against that publication rather than stale live indexes.
       yield* editor.commit(base({ session: "bob", documents: [] }))
       yield* probe.resumeStart("Document", "slow")
       yield* editor.idle
 
+      expect(probe.startupCompletions.filter((completion) =>
+        completion.family === "Document" && completion.key === "slow")).toHaveLength(1)
       expect(matching(probe, "running", "Document", "slow")).toEqual([])
       expect(matching(probe, "stop", "Workspace", "main").length).toBeGreaterThan(0)
       expect(yield* editor.status("Document", "slow")).toBe("None")

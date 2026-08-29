@@ -10,8 +10,8 @@ import type { LifetimeStatus } from "../src/Status.js"
  * object `Reconciler.make` returns but deliberately kept off the public
  * `Controller` type, so tests reach them through this one bridge.
  */
-export const hooks = <State>(controller: Reconciler.Controller<State>): TestHooks =>
-  (controller as unknown as { readonly [TestHooksId]: TestHooks })[TestHooksId]
+export const hooks = <State>(controller: Reconciler.Controller<State>): TestHooks<State> =>
+  (controller as unknown as { readonly [TestHooksId]: TestHooks<State> })[TestHooksId]
 
 /** Completes once the controller has converged on the published desire. */
 export const idle = <State>(controller: Reconciler.Controller<State>): Effect.Effect<void> =>

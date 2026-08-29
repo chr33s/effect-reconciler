@@ -25,9 +25,11 @@ would not be the services your code asks for.
 
 > **Experimental `0.x`.** The kernel and its semantics are specified in
 > [`docs/spec.md`](docs/spec.md) and held to the conformance suite (spec §14).
-> The project is currently testing a smaller Layer + Atom rebase; see the
-> [experiment and measured findings](experiments/layer-atom/README.md). No
-> architecture claim has been changed yet. `Definition`, `Binding`, `commit`,
+> A smaller Atom → generation kernel → Layer REBASE prototype now passes its
+> targeted lifecycle characterizations and 10k scale gate; see the
+> [implementation and measured findings](experiments/layer-atom/README.md). The
+> stable package remains unchanged while its typed family compiler is designed.
+> `Definition`, `Binding`, `commit`,
 > `status`, `snapshot` and `shutdown` are
 > the parts meant to be built on. **`retry`, `failures`, `changes`, `events`,
 > `diagnostics`, supervision policies, incremental `deps` and observed state
@@ -453,23 +455,29 @@ so `tsc` reports Effect language-service diagnostics alongside type errors
 
 ```sh
 npm install
-npm run check   # tsc --strict + Effect diagnostics; includes type-misuse assertions
-npm run lint    # Effect language-service diagnostics on their own
-npm test        # @effect/vitest conformance suite
+npm run check   # supported package: tsc --strict + type-misuse assertions
+npm run lint    # supported package: Effect language-service diagnostics
+npm test        # supported-package @effect/vitest conformance suite
+npm run check:experiments # separate Layer + Atom type check
+npm run lint:experiments  # separate Layer + Atom Effect diagnostics
+npm run test:experiments  # Layer + Atom architectural characterizations
 npm run bench   # scale benchmark, 100 / 1k / 10k lifetimes (see bench/RESULTS.md)
 npm run build   # dist/: ESM + declarations + maps, from tsconfig.build.json
 npm run verify-package   # pack, install into a throwaway project, drive it
 ```
 
-`prepack` runs check, lint, test and build, so nothing publishes that has not
-passed all four. The published tarball carries `dist/` and `src/` — the maps
+`prepack` runs check, lint, the supported-package tests and build. Experimental
+tests are deliberately excluded from publishability and run in their own CI
+job instead. The published tarball carries `dist/` and `src/` — the maps
 point at the sources, so a stack trace and a go-to-definition both land in
 real code. `src/internal/` is emitted because the public declarations refer to
 it, but it is unreachable through `exports`: only the modules named there are
 the `0.x` surface.
 
-CI runs check, lint, the conformance suite, the build and `verify-package` on
-the minimum supported Node LTS (24) and Node current for every push and pull request. `verify-package` is the
+CI runs check, lint, the package conformance suite, the build and
+`verify-package` on the minimum supported Node LTS (24) and Node current for
+every push and pull request. A separate Node 24 job runs the architectural
+experiments explicitly. `verify-package` is the
 one step nothing above it can stand in for: it packs the tarball, installs it
 into a throwaway project with `effect` supplied from outside, and drives the
 package through its public entry points — so an `exports` entry pointing at a

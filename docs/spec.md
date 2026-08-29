@@ -387,8 +387,10 @@ Physical absence after finalization is not a durable public state (§9.1).
 ### 6.5 Obsolescence and late completion
 
 A physical lifetime stays valid only while its semantic desire, its physical
-owner and every bound provider instance remain current. When any of those
-fails, it becomes obsolete: it admits no new children or reconciler-owned work,
+owner and every bound provider instance remain current. Startup completion
+validates those conditions against the latest desired-state publication, not
+against live indexes that a later reconciliation pass has not retired yet.
+When any of those conditions fails, it becomes obsolete: it admits no new children or reconciler-owned work,
 satisfies no new dependents, loses readiness authority, begins Scope closure
 and invalidates its dependents' bindings. If it was still Starting, startup is
 interrupted. Finalization then proceeds asynchronously.
@@ -1094,7 +1096,8 @@ than hidden. *Evidence:* §9.10, `test/nested.test.ts`.
   dependent admission, and provider generations never mix
   (`dependencies.test.ts`, `environmentIsolation.test.ts`);
 - startup is interruptible, and late startup completion never resurrects an
-  obsolete lifetime (`ownership.test.ts`, `shutdown.test.ts`);
+  obsolete lifetime—including when desire is published before the retirement
+  pass updates live indexes (`ownership.test.ts`, `shutdown.test.ts`);
 - sequential replacement preserves exclusivity with latest-state coalescing;
   overlap replacement permits safe coexistence (`replacement.test.ts`);
 - commits linearize, publish atomically, and never await convergence

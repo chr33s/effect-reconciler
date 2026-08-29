@@ -3,7 +3,7 @@ import { describe, expect, it } from "@effect/vitest"
 import * as Reconciler from "../src/Reconciler.js"
 import * as Replacement from "../src/Replacement.js"
 import { bindEditor, makeEditor, model, SessionService } from "./fixtures.js"
-import { count, eventually, idle } from "./util.js"
+import { count, eventually, hooks, idle } from "./util.js"
 
 describe("ownership", () => {
   it.live("9.3 — owner invalidation closes all descendants structurally", () =>
@@ -140,6 +140,53 @@ describe("ownership", () => {
       expect(count(log, "workspace:main")).toBe(2)
       expect(count(log, "document:a-only")).toBe(1)
       expect(count(log, "document:b-only")).toBe(1)
+    }))
+
+  it.live("§6.5 — desire publication suppresses startup completion before the retirement pass", () =>
+    Effect.gen(function* () {
+      const log: Array<string> = []
+      const release = yield* Deferred.make<void>()
+      const returned = yield* Deferred.make<void>()
+      const Def = Reconciler.define((define) => ({
+        Slow: define.one("Slow", {
+          start: (key: string) =>
+            Effect.uninterruptible(
+              Effect.gen(function* () {
+                log.push(`begin:${key}`)
+                yield* Deferred.await(release)
+                log.push(`completed:${key}`)
+                yield* Deferred.succeed(returned, void 0)
+              })
+            )
+        })
+      }))
+      const controller = yield* Reconciler.make(
+        Def.bind<{ readonly key: Option.Option<string> }>((bind) => ({
+          slow: bind.one(Def.Slow, (state) => state.key)
+        }))
+      )
+
+      yield* controller.commit({ key: Option.some("old") })
+      yield* eventually(() => log.includes("begin:old"), "old startup blocked")
+
+      // Publish absence while holding the controller mutex, then let startup
+      // return before the reconcile loop is woken. The completion callback is
+      // queued against newer desire while the old generation is still indexed
+      // as Starting: this is the exact publication/completion race.
+      yield* hooks(controller).commitBeforeWake(
+        { key: Option.none() },
+        Effect.andThen(
+          Deferred.succeed(release, void 0),
+          Effect.andThen(Deferred.await(returned), Effect.yieldNow)
+        )
+      )
+      yield* idle(controller)
+
+      expect(log).toEqual(["begin:old", "completed:old"])
+      const diagnostics = yield* controller.diagnostics
+      expect(diagnostics.started).toBe(0)
+      expect(diagnostics.startupFailures).toBe(0)
+      expect(diagnostics.lifetimes.total).toBe(0)
     }))
 
   it.live("9.6 — late child startup completion cannot outlive its replaced owner", () =>

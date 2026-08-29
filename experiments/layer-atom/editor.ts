@@ -133,6 +133,8 @@ const label = (family: Family, key: unknown): string => `${family}:${String(key)
 export interface Probe {
   readonly events: Array<LifecycleEvent>
   readonly captures: Array<DiagnosticCapture>
+  /** Layer acquisition bodies that returned, before lifecycle publication. */
+  readonly startupCompletions: Array<{ readonly family: Family; readonly key: unknown; readonly generation: number }>
   readonly failures: Set<string>
   readonly startGates: Map<string, Deferred.Deferred<void>>
   readonly stopGates: Map<string, Deferred.Deferred<void>>
@@ -147,6 +149,7 @@ export interface Probe {
 export const makeProbe = (): Probe => {
   const events: Array<LifecycleEvent> = []
   const captures: Array<DiagnosticCapture> = []
+  const startupCompletions: Probe["startupCompletions"] = []
   const failures = new Set<string>()
   const startGates = new Map<string, Deferred.Deferred<void>>()
   const stopGates = new Map<string, Deferred.Deferred<void>>()
@@ -162,6 +165,7 @@ export const makeProbe = (): Probe => {
   return {
     events,
     captures,
+    startupCompletions,
     failures,
     startGates,
     stopGates,
@@ -178,7 +182,7 @@ export const makeProbe = (): Probe => {
   }
 }
 
-interface Layers {
+export interface Layers {
   readonly settings: (key: number, generation: number) => Layer.Layer<Settings, StartupFailed>
   readonly session: (key: string, generation: number) => Layer.Layer<Session, StartupFailed>
   readonly workspace: (
@@ -199,7 +203,7 @@ interface Layers {
   ) => Layer.Layer<Diagnostics, StartupFailed, Settings | Session | Workspace | Language | Document>
 }
 
-const makeLayers = (probe: Probe): Layers => {
+export const makeLayers = (probe: Probe): Layers => {
   const acquire = <A, R>(
     family: Family,
     key: unknown,
@@ -208,19 +212,27 @@ const makeLayers = (probe: Probe): Layers => {
   ): Effect.Effect<A, StartupFailed, Scope.Scope | R> =>
     Effect.gen(function* () {
       probe.events.push({ type: "start", family, key, generation })
+      const finish = Effect.gen(function* () {
+        if (probe.failures.has(label(family, key))) {
+          return yield* new StartupFailed({ family, key })
+        }
+        yield* Effect.addFinalizer(() =>
+          Effect.gen(function* () {
+            probe.events.push({ type: "stopping", family, key, generation })
+            const stopGate = probe.stopGates.get(label(family, key))
+            if (stopGate !== undefined) yield* Deferred.await(stopGate)
+            probe.events.push({ type: "stop", family, key, generation })
+          }))
+        const acquired = yield* value
+        probe.startupCompletions.push({ family, key, generation })
+        return acquired
+      })
       const startGate = probe.startGates.get(label(family, key))
-      if (startGate !== undefined) yield* Deferred.await(startGate)
-      if (probe.failures.has(label(family, key))) {
-        return yield* new StartupFailed({ family, key })
-      }
-      yield* Effect.addFinalizer(() =>
-        Effect.gen(function* () {
-          probe.events.push({ type: "stopping", family, key, generation })
-          const stopGate = probe.stopGates.get(label(family, key))
-          if (stopGate !== undefined) yield* Deferred.await(stopGate)
-          probe.events.push({ type: "stop", family, key, generation })
-        }))
-      return yield* value
+      if (startGate === undefined) return yield* finish
+      // Deliberately uninterruptible through completion: race tests exercise a
+      // startup that really returns after desire changed, rather than one
+      // Scope-close can erase before its completion callback runs.
+      return yield* Effect.uninterruptible(Effect.andThen(Deferred.await(startGate), finish))
     })
 
   return {
@@ -495,6 +507,50 @@ export const make = (
         }
       }
 
+      // Atom publication is synchronous, reconciliation is not. Completion
+      // must therefore validate against `desired` itself rather than trusting
+      // indexes that the next pass has not retired yet.
+      const startupIsAuthoritative = (
+        inst: Generation,
+        checked: Set<Generation> = new Set()
+      ): boolean => {
+        if (checked.has(inst)) return true
+        checked.add(inst)
+        if (!currentFor(inst)) return false
+        switch (inst.family) {
+          case "Settings":
+            if (settings !== inst || !Equal.equals(inst.key, desired.settingsRevision)) return false
+            break
+          case "Session":
+            if (session !== inst || !Equal.equals(inst.key, desired.session)) return false
+            break
+          case "Workspace":
+            if (
+              workspace !== inst ||
+              desired.workspace === null ||
+              !Equal.equals(inst.key, desired.workspace)
+            ) return false
+            break
+          case "Language":
+            if (language !== inst || !Equal.equals(inst.key, desired.language)) return false
+            break
+          case "Document":
+            if (
+              documents.get(inst.key as string) !== inst ||
+              !desired.documents.some((uri) => Equal.equals(uri, inst.key))
+            ) return false
+            break
+          case "Diagnostics":
+            if (
+              diagnostics.get(inst.key as string) !== inst ||
+              !desired.documents.some((uri) => Equal.equals(uri, inst.key))
+            ) return false
+            break
+        }
+        if (inst.owner !== null && !startupIsAuthoritative(inst.owner, checked)) return false
+        return inst.providers.every((provider) => startupIsAuthoritative(provider, checked))
+      }
+
       const closeInstance = (inst: Generation): Effect.Effect<void> => {
         if (inst.closing !== null) return Deferred.await(inst.closing)
         const done = Deferred.makeUnsafe<void>()
@@ -604,6 +660,7 @@ export const make = (
                     if (!open || inst.status !== "starting" || !currentFor(inst)) {
                       return Effect.void
                     }
+                    if (!startupIsAuthoritative(inst)) return retire(inst)
                     if (Exit.isSuccess(exit)) {
                       inst.output = exit.value
                       inst.childContext = Context.merge(contextAtAdmission, exit.value)
